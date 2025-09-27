@@ -52,7 +52,7 @@ curl http://127.0.0.1:5005/ping
 	•	POST /order → envia ordem (JSON payload)
 	•	GET /positions → lista posições abertas
 
-🛠 Desenvolvimento
+## 🛠 Desenvolvimento
 	•	app.py contém a lógica principal do FastAPI
 	•	Adiciona endpoints conforme precisares (ex.: histórico de OHLCV, trailing stop, etc.)
 	•	Usa uvicorn com --reload para hot-reload em dev.

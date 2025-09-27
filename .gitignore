@@ -1,0 +1,76 @@
+# --- Python / Virtualenv ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtualenv
+.venv/
+env/
+venv/
+
+# --- Configuração / Secrets ---
+# nunca commitar credenciais reais
+/secrets/
+/config/
+/*.ini
+/*.yaml
+!*.example.yaml
+!*.sample.yaml
+.env*
+.env.*
+*.env
+!.env.sample
+
+# --- Logs / Temp ---
+logs/
+*.log
+*.pid
+*.lock
+*.tmp
+*.bak
+*.swp
+
+# --- Cache / Build ---
+dist/
+build/
+*.egg-info/
+.eggs/
+.cache/
+.mypy_cache/
+pytest_cache/
+coverage.xml
+htmlcov/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.iml
+
+# --- Uvicorn / FastAPI runtime ---
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Windows / macOS lixo ---
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Logs / temporários
+*.log
+*.tmp
+*.pid
+
+# Configs locais
+outputs/

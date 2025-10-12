@@ -82,3 +82,59 @@ class MarketData:
         df = df[cols].drop_duplicates("timestamp").sort_values("timestamp").reset_index(drop=True)
         df = df.assign(symbol=symbol, timeframe=tf)
         return df.to_dict(orient="records")
+    
+    def symbol_info(self, symbol: str):
+        self.s.ensure_up()
+        self.s.ensure_symbol(symbol)
+        inf = MT5.symbol_info(symbol)
+        if inf is None:
+            raise RuntimeError("symbol_info returned None")
+        d = nt_to_dict(inf)
+
+        # extrato útil (devolve tudo o que existir, senão None)
+        return {
+            "symbol": d.get("name") or symbol,
+            "path": d.get("path"),
+            "trade_mode": d.get("trade_mode"),
+            "digits": d.get("digits"),
+            "point": d.get("point"),
+            "trade_contract_size": d.get("trade_contract_size") or d.get("contract_size"),
+            "trade_tick_value": d.get("trade_tick_value") or d.get("tick_value"),
+            "trade_tick_size": d.get("trade_tick_size") or d.get("tick_size"),
+            "margin_initial": d.get("margin_initial"),
+            "margin_maintenance": d.get("margin_maintenance"),
+            "volume_min": d.get("volume_min"),
+            "volume_max": d.get("volume_max"),
+            "volume_step": d.get("volume_step"),
+            "spreads": {
+                "spread": d.get("spread"),
+                "spread_float": d.get("spread_float"),
+            },
+            "session_deals": d.get("session_deals"),
+            "session_buy_orders": d.get("session_buy_orders"),
+            "session_sell_orders": d.get("session_sell_orders"),
+        }
+
+    def quote(self, symbol: str):
+        self.s.ensure_up()
+        self.s.ensure_symbol(symbol)
+        t = MT5.symbol_info_tick(symbol)
+        if t is None:
+            code, msg = MT5.last_error()
+            raise RuntimeError(f"symbol_info_tick None ({code},{msg})")
+        td = nt_to_dict(t)
+
+        # enriquecer com meta do símbolo (point/digits) para facilitar cálculos no executor
+        inf = MT5.symbol_info(symbol)
+        meta = nt_to_dict(inf) if inf else {}
+        return {
+            "symbol": symbol,
+            "time": td.get("time"),
+            "bid": float(td.get("bid", 0) or 0),
+            "ask": float(td.get("ask", 0) or 0),
+            "last": float(td.get("last", 0) or 0),
+            "volume": td.get("volume"),
+            "flags": td.get("flags"),
+            "point": meta.get("point"),
+            "digits": meta.get("digits"),
+        }

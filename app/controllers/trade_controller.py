@@ -9,7 +9,7 @@ from fastapi import APIRouter, Header, Query, Depends, HTTPException
 import traceback
 import MetaTrader5 as mt5
 
-from app.services.auth_service import require_api_key
+from app.shareweb import require_api_key
 from app.services.mt5 import MT5Service
 from app.models.market_order import MarketOrder
 

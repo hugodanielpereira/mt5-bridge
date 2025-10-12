@@ -1,0 +1,1 @@
+# vazio está ok, só para garantir que 'app' é package

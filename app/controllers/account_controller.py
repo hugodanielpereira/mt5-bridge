@@ -1,7 +1,7 @@
 from typing import Optional
 from fastapi import APIRouter, Header
 
-from app.services.auth_service import require_api_key
+from app.shareweb import require_api_key
 from app.services.mt5 import MT5Service
 
 router = APIRouter(tags=["account"])

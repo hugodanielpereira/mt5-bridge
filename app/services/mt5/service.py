@@ -1,57 +1,143 @@
 # app/services/mt5/service.py
 from __future__ import annotations
+
 import os
+import re
+import inspect
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# ---- import the CLASS-based modules you already have
+from dotenv import load_dotenv
+
 from .session import MT5Session
 from .marketdata import MarketData
 from .trade import Trade
 from .history import History
-from .diag import diag as _diag  # keep it a function if you prefer
+from .diag import diag as _diag  # função existente
 
-from dotenv import load_dotenv
-load_dotenv()
+# Em DEV queremos que o .env tenha precedência sobre o ambiente/sistema
+load_dotenv(override=True)
 
 try:
     import MetaTrader5 as MT5
 except Exception as e:
     raise RuntimeError(f"MetaTrader5 import failed: {e!r}")
 
+
+def _split_exe_args(raw: str) -> tuple[str, str]:
+    """
+    Aceita:
+      C:\\...\terminal64.exe /portable
+      "C:\\...\terminal64.exe" /portable
+    Devolve (exe, args_inline)
+    """
+    s = (raw or "").strip()
+    if not s:
+        return "", ""
+    m = re.match(r'^\s*"?(.*?\.exe)"?\s*(.*)$', s, flags=re.IGNORECASE)
+    if not m:
+        return s, ""
+    exe, extra = m.group(1), (m.group(2) or "")
+    return exe, extra.strip()
+
+
+def _as_bool(v: Optional[str], default: bool = False) -> bool:
+    if v is None:
+        return default
+    return str(v).strip().lower() in ("1", "true", "yes", "on", "y")
+
+
 class MT5Service:
-    """Façade simples a compor os módulos mt5/*."""
+    """
+    Serviço de alto nível para o MT5, responsável por:
+      - Resolver DEMO/LIVE a partir de ENVIRONMENT/BRIDGE_ENV
+      - Montar caminho do terminal + args (inclui /portable se requerido)
+      - Instanciar MT5Session com kwargs compatíveis (via introspeção)
+      - Expor uma façade (market/trade/history) usada pelos controladores
+    Env relevantes:
+      ENVIRONMENT=demo|live
+      MT5_TERMINAL_PATH_DEMO, MT5_TERMINAL_PATH_LIVE ou MT5_TERMINAL_PATH
+      MT5_TERMINAL_ARGS
+      REQUIRE_PORTABLE=0|1
+      KILL_NON_PORTABLE_DEMO=0|1, KILL_NON_PORTABLE_LIVE=0|1
+      MT5_LOGIN_DEMO, MT5_PASSWORD_DEMO, MT5_SERVER_DEMO
+      MT5_LOGIN_LIVE, MT5_PASSWORD_LIVE, MT5_SERVER_LIVE
+    """
+    def __init__(self, *args, **kwargs):
+        # --- ambiente -------------------------------------------------------
+        env = (os.getenv("ENVIRONMENT") or os.getenv("BRIDGE_ENV") or "demo").strip().lower()
+        self.is_live: bool = (env == "live")
 
-    def __init__(self) -> None:
-        env = (os.getenv("ENVIRONMENT", "demo") or "demo").lower()
-        suf = "_LIVE" if env == "live" else "_DEMO"
+        # --- caminhos / argumentos -----------------------------------------
+        raw_path = (
+            os.getenv("MT5_TERMINAL_PATH_LIVE") if self.is_live else os.getenv("MT5_TERMINAL_PATH_DEMO")
+        ) or os.getenv("MT5_TERMINAL_PATH") or ""
+        exe, inline_args = _split_exe_args(raw_path)
+        extra_args = (os.getenv("MT5_TERMINAL_ARGS") or "").strip()
+        args_joined = " ".join(x for x in (inline_args, extra_args) if x).strip()
 
-        def pick(key: str) -> Optional[str]:
-            return os.getenv(f"{key}{suf}") or os.getenv(key)
-
-        term = pick("MT5_TERMINAL_PATH")
-        self.login = pick("MT5_LOGIN")
-        self.password = pick("MT5_PASSWORD")
-        self.server = pick("MT5_SERVER")
-
-        if not term or not Path(term).exists():
-            raise RuntimeError(f"MT5_TERMINAL_PATH inválido: {term!r}")
-
-        self.exe_path = Path(term).resolve()
-        self.connected = False
-
-        # sessão principal
-        self.session = MT5Session(
-            exe_path=self.exe_path,
-            login=self.login,
-            password=self.password,
-            server=self.server,
+        # --- flags ----------------------------------------------------------
+        self.require_portable: bool = _as_bool(os.getenv("REQUIRE_PORTABLE"), False)
+        self.kill_non_portable: bool = _as_bool(
+            os.getenv("KILL_NON_PORTABLE_LIVE" if self.is_live else "KILL_NON_PORTABLE_DEMO"),
+            False,
         )
 
-        # módulos (1x cada)
+        if self.require_portable and "/portable" not in args_joined.lower():
+            args_joined = (args_joined + " /portable").strip()
+
+        # --- validações -----------------------------------------------------
+        if not exe or not Path(exe).exists():
+            raise RuntimeError(f"MT5_TERMINAL_PATH inválido: {raw_path!r}")
+
+        # guardas para diagnóstico
+        self.exe_path: str = exe                      # string do .env (mantemos para logging)
+        self.exe_args: str = args_joined
+
+        # --- credenciais por ambiente --------------------------------------
+        self.login: Optional[str] = os.getenv("MT5_LOGIN_LIVE" if self.is_live else "MT5_LOGIN_DEMO")
+        self.password: Optional[str] = os.getenv("MT5_PASSWORD_LIVE" if self.is_live else "MT5_PASSWORD_DEMO")
+        self.server: Optional[str] = os.getenv("MT5_SERVER_LIVE" if self.is_live else "MT5_SERVER_DEMO")
+
+        # --- construir kwargs para MT5Session -------------------------------
+        session_kwargs: Dict[str, Any] = {
+            # preferimos Path para exe_path; mantemos alias "exe" por compatibilidade
+            "exe_path": Path(self.exe_path),
+            "exe": self.exe_path,
+            # credenciais
+            "login": self.login,
+            "password": self.password,
+            "server": self.server,
+            # extras comuns (só entram se o __init__ aceitar)
+            "terminal_args": self.exe_args,
+            "args": self.exe_args,
+            "require_portable": self.require_portable,
+            "kill_non_portable": self.kill_non_portable,
+        }
+
+        # filtra só o que o __init__ realmente aceita
+        try:
+            sig = inspect.signature(MT5Session)  # type: ignore[arg-type]
+            allowed = set(sig.parameters.keys())
+            filtered = {k: v for k, v in session_kwargs.items() if k in allowed}
+            self.session = MT5Session(**filtered)  # type: ignore[call-arg]
+        except TypeError:
+            # fallback mínimo (ordem posicional legacy): exe_path, login, password, server
+            self.session = MT5Session(self.exe_path, self.login, self.password, self.server)  # type: ignore[misc]
+
+        # fallback universal: se a classe tiver atributos, setta-os
+        for k, v in session_kwargs.items():
+            if hasattr(self.session, k):
+                try:
+                    setattr(self.session, k, v)
+                except Exception:
+                    pass
+
+        # módulos da façade
         self.market = MarketData(self.session)
         self.trade = Trade(self.session)
         self.history = History(self.session)
+        self.connected: bool = False
 
     # ---- lifecycle ----------------------------------------------------------
     def initialize(self) -> bool:
@@ -61,6 +147,7 @@ class MT5Service:
             except Exception:
                 pass
 
+            # arranca terminal e conecta
             self.session.ensure_terminal_running()
             self.session.attach_specific()
 
@@ -82,7 +169,7 @@ class MT5Service:
     def ensure_up(self) -> None:
         self.session.ensure_up()
 
-    # ---- façade API (delegates) --------------------------------------------
+    # ---- façade API ---------------------------------------------------------
     def account_info(self) -> Dict[str, Any]:
         return self.market.account_info()
 
@@ -115,3 +202,9 @@ class MT5Service:
 
     def orders_recent(self, days: int = 1):
         return self.history.orders_recent(days)
+
+    def symbol_info(self, symbol: str):
+        return self.market.symbol_info(symbol)
+
+    def quote(self, symbol: str):
+        return self.market.quote(symbol)

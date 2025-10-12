@@ -4,6 +4,7 @@ import os
 import logging
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
+from app.shareweb import set_service
 
 from fastapi import FastAPI, Query
 from dotenv import load_dotenv
@@ -15,6 +16,7 @@ from app.controllers.data_controller import router as data_router
 from app.controllers.account_controller import router as account_router
 from app.controllers.history_controller import router as history_router
 from app.controllers.debug_controller import router as debug_router
+from app.controllers.ui_controller import router as ui_router
 
 load_dotenv()
 
@@ -67,8 +69,33 @@ def startup():
     svc = MT5Service()
     ok = bool(svc.initialize())
     app.state.mt5 = svc
+
+    # registra globalmente o serviço MT5 (para get_service() funcionar)
+    set_service(svc)
+
     log = logging.getLogger("bridge")
-    strict = os.getenv("BRIDGE_STRICT_STARTUP","0").lower() in ("1","true","yes","on")
+    strict = os.getenv("BRIDGE_STRICT_STARTUP", "0").lower() in ("1", "true", "yes", "on")
+
+    try:
+        import MetaTrader5 as MT5  # type: ignore
+        ti = MT5.terminal_info()
+        build = getattr(ti, "build", None) if ti else None
+        data_path = getattr(ti, "data_path", None) if ti else None
+    except Exception:
+        build = None
+        data_path = None
+
+    log.info(
+        "[MT5] env check: exe=%s | args=%s | login=%s | server=%s | build=%s | data_path=%s | require_portable=%s",
+        getattr(svc, "exe_path", None),
+        getattr(svc, "exe_args", None),
+        getattr(svc, "login", None),
+        getattr(svc, "server", None),
+        build,
+        data_path,
+        os.getenv("REQUIRE_PORTABLE", "0"),
+    )
+
     if ok:
         log.info("[MT5] ligado com sucesso")
     else:
@@ -76,6 +103,15 @@ def startup():
         if strict:
             raise RuntimeError(msg)
         log.error(msg)
+
+@app.on_event("shutdown")
+def shutdown():
+    try:
+        import MetaTrader5 as MT5  # type: ignore
+        MT5.shutdown()
+        logging.getLogger("bridge").info("[MT5] shutdown() chamado")
+    except Exception:
+        pass
 
 @app.get("/ping")
 def ping():
@@ -108,3 +144,4 @@ app.include_router(data_router)
 app.include_router(account_router)
 app.include_router(history_router)
 app.include_router(debug_router)
+app.include_router(ui_router)

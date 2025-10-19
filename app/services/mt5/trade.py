@@ -1,6 +1,5 @@
 # app/services/mt5/trade.py
 from __future__ import annotations
-
 from typing import Any, Dict, List, Optional
 
 try:
@@ -10,13 +9,53 @@ except Exception as e:  # pragma: no cover
 
 from .session import MT5Session
 from .utils import nt_to_dict, sanitize_comment
+from decimal import Decimal, ROUND_FLOOR
 
 
 class Trade:
-    """Trading ops (market orders, close by symbol/ticket)."""
-
     def __init__(self, session: MT5Session) -> None:
         self.s = session
+
+    # -------- helper: normalização de volume --------
+    def _normalize_volume(self, info, vol_in: float) -> float:
+        """
+        Ajusta volume aos limites do símbolo:
+          - >= volume_min
+          - múltiplo de volume_step (a partir de volume_min)
+          - <= volume_max
+        """
+        try:
+            vmin  = float(getattr(info, "volume_min", 0) or 0)
+            vstep = float(getattr(info, "volume_step", 0) or 0)
+            vmax  = float(getattr(info, "volume_max", 0) or 0)
+        except Exception:
+            vmin, vstep, vmax = 0.0, 0.0, 0.0
+
+        v = float(vol_in)
+
+        if vmin > 0 and v < vmin:
+            v = vmin
+
+        if vstep and vstep > 0:
+            dv   = Decimal(str(v))
+            dmin = Decimal(str(vmin))
+            dstep= Decimal(str(vstep))
+            steps = ((dv - dmin) / dstep).quantize(Decimal("1"), rounding=ROUND_FLOOR)
+            dv_ok = dmin + steps * dstep
+            if dv_ok < dmin:
+                dv_ok = dmin
+            v = float(dv_ok)
+
+        if vmax and vmax > 0 and v > vmax:
+            v = vmax
+
+        if v <= 0:
+            v = vmin if vmin > 0 else (vstep if vstep > 0 else 0.01)
+
+        if vstep and vstep > 0:
+            decs = max(0, len(str(vstep).split(".")[-1]) if "." in str(vstep) else 0)
+            v = round(v, decs)
+        return v
 
     def order_market(
         self,
@@ -31,13 +70,9 @@ class Trade:
         comment: Optional[str] = "mlsl-exec",
         position: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """
-        Ordem a mercado com fallback de filling e fallback extra:
-        - se broker recusar `comment`, reenvia **sem** o campo `comment`.
-        """
         self.s.ensure_up()
 
-        # --- request merge ---
+        # merge pedido
         if req is not None:
             if hasattr(req, "dict"):
                 data = req.dict()
@@ -47,50 +82,46 @@ class Trade:
                 raise RuntimeError("invalid request object for order_market")
         else:
             data = {
-                "symbol": symbol,
-                "side": side,
-                "volume": volume,
-                "magic": magic,
-                "sl": sl,
-                "tp": tp,
-                "comment": comment,
-                "position": position,
+                "symbol": symbol, "side": side, "volume": volume, "magic": magic,
+                "sl": sl, "tp": tp, "comment": comment, "position": position,
             }
 
         for key in ("symbol", "side", "volume"):
             if data.get(key) in (None, ""):
                 raise RuntimeError(f"missing field '{key}'")
 
-        sym = str(data["symbol"])
-        s = str(data["side"]).lower().strip()
-        vol = float(data["volume"])
-        mg = int(data.get("magic", 2025))
-        cm = sanitize_comment(data.get("comment", "mlsl-exec"), fallback="mlsl-exec")
-        slv = data.get("sl")
-        tpv = data.get("tp")
-        pos = data.get("position")
+        sym_raw = str(data["symbol"])
+        side_s  = str(data["side"]).lower().strip()
+        vol     = float(data["volume"])
+        mg      = int(data.get("magic", 2025))
+        cm      = sanitize_comment(data.get("comment", "mlsl-exec"), fallback="mlsl-exec")
+        slv     = data.get("sl"); tpv = data.get("tp"); pos = data.get("position")
 
-        if s not in ("buy", "sell"):
+        if side_s not in ("buy", "sell"):
             raise RuntimeError("side must be 'buy' or 'sell'")
 
-        # --- símbolo & tick ---
-        self.s.ensure_symbol(sym)  # <-- FIX: era self._ensure_symbol(sym)
-        info = MT5.symbol_info(sym)
+        # === RESOLVE & ENSURE ===
+        real_sym = self.s.resolve_symbol(sym_raw)
+        self.s.ensure_symbol(real_sym)
+
+        info = MT5.symbol_info(real_sym)
         if info is None:
             raise RuntimeError("symbol_info returned None")
 
-        tick = MT5.symbol_info_tick(sym)
+        tick = MT5.symbol_info_tick(real_sym)
         if tick is None:
             code, msg = MT5.last_error()
             raise RuntimeError(f"symbol_info_tick None ({code},{msg})")
 
-        price = float(tick.ask if s == "buy" else tick.bid)
-        order_type = MT5.ORDER_TYPE_BUY if s == "buy" else MT5.ORDER_TYPE_SELL
+        # normalizar volume (resolve o retcode 10014 / Invalid volume)
+        vol = self._normalize_volume(info, vol)
 
-        # --- base request ---
+        price = float(tick.ask if side_s == "buy" else tick.bid)
+        order_type = MT5.ORDER_TYPE_BUY if side_s == "buy" else MT5.ORDER_TYPE_SELL
+
         base_req: Dict[str, Any] = {
             "action": MT5.TRADE_ACTION_DEAL,
-            "symbol": sym,
+            "symbol": real_sym,
             "volume": float(vol),
             "type": order_type,
             "price": price,
@@ -98,17 +129,12 @@ class Trade:
             "deviation": 100,
             "type_time": MT5.ORDER_TIME_GTC,
         }
-        # comenta inicialmente (vamos poder removê-lo se der erro)
-        if cm:
-            base_req["comment"] = cm
-        if slv is not None:
-            base_req["sl"] = float(slv)
-        if tpv is not None:
-            base_req["tp"] = float(tpv)
-        if pos is not None:
-            base_req["position"] = int(pos)
+        if cm: base_req["comment"] = cm
+        if slv is not None: base_req["sl"] = float(slv)
+        if tpv is not None: base_req["tp"] = float(tpv)
+        if pos is not None: base_req["position"] = int(pos)
 
-        # --- fillings candidates (prioridade mais compatível: IOC -> RETURN -> FOK) ---
+        # fillings preferidos
         candidates: List[int] = []
         for fm in (
             getattr(MT5, "ORDER_FILLING_IOC", None),
@@ -117,127 +143,59 @@ class Trade:
         ):
             if isinstance(fm, int):
                 candidates.append(fm)
-
-        # se o símbolo expõe filling_mode válido, mete-o no topo sem duplicar
         try:
             if hasattr(info, "filling_mode"):
                 fm_sym = int(info.filling_mode)
-                if fm_sym in candidates:
-                    candidates.remove(fm_sym)
+                if fm_sym in candidates: candidates.remove(fm_sym)
                 candidates.insert(0, fm_sym)
         except Exception:
             pass
 
-        # --- função utilitária para tentar (order_check -> order_send) para um dado filling ---
         def try_with_filling(payload: Dict[str, Any], fm: Optional[int]) -> Optional[Dict[str, Any]]:
             req_payload = dict(payload)
-            if fm is not None:
-                req_payload["type_filling"] = int(fm)
-            else:
-                # garantir que não herdamos algum valor anterior
-                req_payload.pop("type_filling", None)
+            if fm is not None: req_payload["type_filling"] = int(fm)
+            else: req_payload.pop("type_filling", None)
 
-            # 1) order_check (se falhar com 10030, saltamos para próximo filling)
             chk = MT5.order_check(req_payload)
             if chk is not None and getattr(chk, "retcode", None) not in (MT5.TRADE_RETCODE_DONE, 0):
-                # Unsupported filling mode → tenta próximo
                 if getattr(chk, "retcode", None) == 10030:
                     return None
-                # outros erros de check: propaga
                 code, msg = MT5.last_error()
                 raise RuntimeError(
                     f"order_check failed retcode={getattr(chk,'retcode',None)} "
                     f"comment={getattr(chk,'comment',None)} last_error=({code},{msg})"
                 )
 
-            # 2) order_send
             res = MT5.order_send(req_payload)
             if res is None:
                 code, msg = MT5.last_error()
-                # se for queixa de comment inválido, sinalizamos para o chamador
                 if msg and 'Invalid "comment" argument' in str(msg):
                     raise ValueError("invalid-comment")
                 return None
-
             d = nt_to_dict(res)
             if d.get("retcode") == MT5.TRADE_RETCODE_DONE:
                 return d
             return None
 
-        # --- 1ª tentativa: com comment normal ---
         try:
-            # percorre fillings conhecidos
             for fm in candidates:
                 ok = try_with_filling(base_req, fm)
-                if ok:
-                    return ok
-            # última tentativa: sem especificar filling (deixa o servidor decidir)
+                if ok: return ok
             ok = try_with_filling(base_req, None)
-            if ok:
-                return ok
-
+            if ok: return ok
         except ValueError as ve:
-            # 'invalid-comment' → refazemos sem comment
             if str(ve) == "invalid-comment":
-                base2 = dict(base_req)
-                base2.pop("comment", None)
-                # repete o ciclo com base2
+                base2 = dict(base_req); base2.pop("comment", None)
                 for fm in candidates:
                     ok = try_with_filling(base2, fm)
-                    if ok:
-                        return ok
+                    if ok: return ok
                 ok = try_with_filling(base2, None)
-                if ok:
-                    return ok
-                # se ainda falhar, cai no bloco final abaixo
+                if ok: return ok
             else:
                 raise
 
-        # --- se chegou aqui, recolhe último erro e reporta ---
         code, msg = MT5.last_error()
         raise RuntimeError(f"order_send failed for all fillings; last_error=({code},{msg})")
-
-        # --- order_check (opcional, com o 1º filling) ---
-        check_req = dict(base_req)
-        check_req["type_filling"] = candidates[0]
-        chk = MT5.order_check(check_req)
-        if chk is not None and getattr(chk, "retcode", None) not in (MT5.TRADE_RETCODE_DONE, 0):
-            code, msg = MT5.last_error()
-            raise RuntimeError(
-                f"order_check failed retcode={getattr(chk,'retcode',None)} "
-                f"comment={getattr(chk,'comment',None)} last_error=({code},{msg})"
-            )
-
-        # --- tenta enviar; se der "Invalid \"comment\" argument", tenta sem comment ---
-        def try_send(payload: Dict[str, Any]) -> Dict[str, Any]:
-            errs: List[Dict[str, Any]] = []
-            for fm in candidates:
-                req_payload = dict(payload)
-                req_payload["type_filling"] = fm
-                res = MT5.order_send(req_payload)
-                if res is None:
-                    code, msg = MT5.last_error()
-                    errs.append({"filling": fm, "error": "order_send None", "last_error": [code, msg]})
-                    if msg and "Invalid \"comment\" argument" in str(msg):
-                        raise ValueError("invalid-comment")
-                    continue
-                d = nt_to_dict(res)
-                if d.get("retcode") == MT5.TRADE_RETCODE_DONE:
-                    return d
-                errs.append({"filling": fm, "retcode": d.get("retcode"), "raw": d})
-            code, msg = MT5.last_error()
-            if msg and "Invalid \"comment\" argument" in str(msg):
-                raise ValueError("invalid-comment")
-            raise RuntimeError(f"order_send failed tries={errs} last_error=({code},{msg})")
-
-        try:
-            return try_send(base_req)
-        except ValueError as ve:
-            if str(ve) == "invalid-comment":
-                payload2 = dict(base_req)
-                payload2.pop("comment", None)
-                return try_send(payload2)
-            raise
 
     def close_symbol(self, symbol: str) -> List[Dict[str, Any]]:
         self.s.ensure_up()

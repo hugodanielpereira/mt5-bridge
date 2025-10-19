@@ -1,0 +1,76 @@
+<!-- app/ui/templates/control.html -->
+<!doctype html>
+<meta charset="utf-8">
+<title>MLSL Control Panel</title>
+<link rel="stylesheet" href="/ui/static/css/app.css">
+
+<header class="topbar">
+  <nav class="tabs">
+    <a class="tab-link" href="/ui/" data-tablink="dash">Dashboard</a>
+    <a class="tab-link" href="/ui/?tab=ops" data-tablink="ops">Ops</a>
+    <a class="tab-link active" href="/ui/control/" data-tablink="control">Control</a>
+  </nav>
+  <div class="topbar-right">
+    <button id="themeToggle" class="btn-small" title="Alternar tema">☀</button>
+  </div>
+</header>
+
+<script>
+  (function(){
+    const KEY='THEME';
+    function getTheme(){ const s=(localStorage.getItem(KEY)||'').toLowerCase(); return (s==='light'||s==='dark')?s:'dark'; }
+    function apply(t){ document.documentElement.classList.toggle('light', t==='light'); const b=document.getElementById('themeToggle'); if(b) b.textContent=(t==='dark')?'☀':'☾'; localStorage.setItem(KEY,t); }
+    apply(getTheme());
+    const btn=document.getElementById('themeToggle');
+    if(btn) btn.addEventListener('click', ()=>apply(getTheme()==='dark'?'light':'dark'));
+  })();
+</script>
+
+<main>
+  <h2 class="title" style="margin:8px 0">Control Panel</h2>
+  <div class="muted">Arranque/Paragem dos serviços e emissão de comandos. A API key é guardada localmente no browser.</div>
+
+  <div class="card" style="margin-top:12px">
+    <label>API Key:
+      <input id="api-key" type="password" placeholder="X-API-Key" style="margin-left:6px">
+    </label>
+    <button id="save-key" class="btn-small" style="margin-left:6px">Guardar</button>
+  </div>
+
+  <div class="card"><div class="title">Bridge</div>
+    <button id="btn-bridge-start">Start</button>
+    <button id="btn-bridge-start-vis">Start (visível)</button>
+    <button id="btn-bridge-stop">Stop</button>
+    <button id="btn-bridge-restart">Restart</button>
+    <button id="btn-bridge-restart-vis">Restart (visível)</button>
+  </div>
+
+  <div class="card"><div class="title">Executor</div>
+    <button id="btn-executor-start">Start</button>
+    <button id="btn-executor-start-vis">Start (visível)</button>
+    <button id="btn-executor-stop">Stop</button>
+    <button id="btn-executor-restart">Restart</button>
+    <button id="btn-executor-restart-vis">Restart (visível)</button>
+  </div>
+
+  <div class="card"><div class="title">Scheduler</div>
+    <button id="btn-scheduler-start">Start</button>
+    <button id="btn-scheduler-start-vis">Start (visível)</button>
+    <button id="btn-scheduler-stop">Stop</button>
+    <button id="btn-scheduler-restart">Restart</button>
+    <button id="btn-scheduler-restart-vis">Restart (visível)</button>
+  </div>
+
+  <div class="card"><div class="title">All</div>
+    <button id="btn-all-start">ALL Start</button>
+    <button id="btn-all-stop">ALL Stop</button>
+    <button id="btn-all-restart">ALL Restart</button>
+  </div>
+
+  <div class="card">
+    <div class="title">Output</div>
+    <textarea id="ops-output" rows="14" style="width:100%" readonly></textarea>
+  </div>
+</main>
+
+<script src="/ui/static/js/control.js"></script>

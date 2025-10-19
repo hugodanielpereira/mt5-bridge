@@ -1,0 +1,45 @@
+<!-- app/ui/templates/ops.html -->
+<!doctype html>
+<meta charset="utf-8">
+<title>MLSL Ops UI v2</title>
+<link rel="stylesheet" href="/ui/static/css/app.css?v=20251015">
+
+<header class="topbar">
+  <nav class="tabs">
+    <a class="tab-link" href="/ui/" data-tablink="dash">Dashboard</a>
+    <a class="tab-link active" href="/ui/?tab=ops" data-tablink="ops">Ops</a>
+    <a class="tab-links" href="/ui/control/" data-tablink="control">Control</a>
+  </nav>
+  <div class="topbar-right">
+    <button id="themeToggle" class="btn-small" title="Alternar tema">☀</button>
+  </div>
+</header>
+
+<script>
+  (function(){
+    const KEY='THEME';
+    function getTheme(){ const s=(localStorage.getItem(KEY)||'').toLowerCase(); return (s==='light'||s==='dark')?s:'dark'; }
+    function apply(t){ document.documentElement.classList.toggle('light', t==='light'); const b=document.getElementById('themeToggle'); if(b) b.textContent=(t==='dark')?'☀':'☾'; localStorage.setItem(KEY,t); }
+    apply(getTheme());
+    const btn=document.getElementById('themeToggle');
+    if(btn) btn.addEventListener('click', ()=>apply(getTheme()==='dark'?'light':'dark'));
+  })();
+</script>
+
+<main>
+  <div id="tab-ops" class="tab active">
+    <div class="row">
+      <select id="opsTarget">
+        <option>all</option><option>bridge</option><option>executor</option><option>retrain</option>
+      </select>
+      <button onclick="opsRun('up')">Up</button>
+      <button onclick="opsRun('down')">Down</button>
+      <button onclick="opsRun('restart')">Restart</button>
+      <button onclick="opsStatus()">Status</button>
+    </div>
+    <textarea id="opsOut" readonly style="width:100%;height:60vh"></textarea>
+  </div>
+</main>
+
+<script src="/ui/static/js/common.js?v=20251015"></script>
+<script src="/ui/static/js/ops.js?v=20251015"></script>

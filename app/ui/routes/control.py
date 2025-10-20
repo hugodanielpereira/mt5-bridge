@@ -57,40 +57,49 @@ def _bridge_scripts_dir() -> Path:
     return Path(env_dir) if env_dir else (_bridges_root() / "mt5-bridge")
 
 def _apps_root() -> Path:
-    env = os.getenv("MLSL_APPS_DIR")
+    env = os.getenv("PROJECT_DIR")
     if env:
         return Path(env)
+    env2 = os.getenv("MLSL_APPS_DIR")
+    if env2:
+        return Path(env2)
     return _bridges_root().parent / "apps" / "ml-strategy-lab"
 
-def _cmd_for(target: str, action: str, *, visible: bool) -> tuple[list[str] | str, Path]:
+def _cmd_for(target: str, action: str, *, visible: bool) -> tuple[list[str] | str, Path, dict]:
     tgt = target.lower().strip()
     act = action.lower().strip()
-    if tgt not in ("bridge", "executor", "scheduler", "retrainer", "all"):
+    valid_targets = {"bridge","executor","scheduler","retrainer","watcher","emitter","all"}
+    if tgt not in valid_targets:
         raise HTTPException(status_code=400, detail=f"target inválido: {target}")
     if act not in ("start", "stop", "restart"):
         raise HTTPException(status_code=400, detail=f"action inválida: {action}")
 
     # mapear nomes para o mlsl.ps1
-    map_target = {"bridge": "bridge", "executor": "executor",
-                  "scheduler": "retrain", "retrainer": "retrain", "all": "all"}[tgt]
-    verb = {"start": "up", "stop": "down", "restart": "restart"}[act]
+    map_target = {
+        "bridge":"bridge",
+        "executor":"executor",
+        "scheduler":"retrain",
+        "retrainer":"retrain",
+        "watcher":"watcher",
+        "emitter":"emitter",
+        "all":"all",
+    }[tgt]
+    verb = {"start":"up","stop":"down","restart":"restart"}[act]
 
     scripts_root = _apps_root() / "scripts"
     mlsl = scripts_root / "mlsl.ps1"
     if not mlsl.exists():
         raise HTTPException(status_code=500, detail=f"mlsl.ps1 não encontrado em {mlsl}")
 
-    # visível: pedimos ao mlsl.ps1 que abra cada serviço em janela
     env = os.environ.copy()
     if visible:
         env["MLSL_VISIBLE"] = "on"
 
     if _win():
         ps = _pwsh_exe()
-        # devolvemos comando e diretorio (o _run já injeta env herdado)
-        return ([ps, "-ExecutionPolicy", "Bypass", "-File", str(mlsl), verb, map_target], scripts_root)
+        return ([ps, "-ExecutionPolicy", "Bypass", "-File", str(mlsl), verb, map_target], scripts_root, env)
     else:
-        return (["bash", str(mlsl), verb, map_target], scripts_root)
+        return (["bash", str(mlsl), verb, map_target], scripts_root, env)
 
 @router.post("/run")
 def run_op(payload: Dict[str, Any]):
@@ -98,11 +107,11 @@ def run_op(payload: Dict[str, Any]):
     action = str(payload.get("action") or "").strip().lower()
     visible = bool(payload.get("visible", False))
     try:
-        cmd, cwd = _cmd_for(target, action, visible=visible)
+        cmd, cwd, env = _cmd_for(target, action, visible=visible)
     except HTTPException as e:
         return _always_json(False, cmd=f"{target} {action}", rc=1, stdout="", stderr=e.detail, cwd=str(Path.cwd()))
 
-    res = _run(cmd, cwd=cwd)
+    res = _run(cmd, cwd=cwd, env=env)  # <<<<< agora passa o env (MLSL_VISIBLE)
     rc, stdout, stderr = int(res.get("rc", -1)), res.get("stdout", ""), res.get("stderr", "")
     cmd_str = cmd if isinstance(cmd, str) else " ".join(shlex.quote(c) for c in cmd)
     return _always_json(ok=(rc == 0), cmd=cmd_str, rc=rc, stdout=stdout, stderr=stderr, cwd=str(cwd))

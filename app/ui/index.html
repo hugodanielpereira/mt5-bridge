@@ -27,7 +27,7 @@
       window.API_BASE   = "/ui/api";                // prefixo das tuas APIs
     </script>
 
-    <link rel="stylesheet" href="/static/css/app.css?v=20251016" />
+    <link rel="stylesheet" href="/static/css/app.css?v=20251019" />
   </head>
   <body>
     <header class="topbar">
@@ -58,6 +58,11 @@
             <span id="light-watcher" class="light off" title="Watcher"></span>
             <span id="meta-watcher" class="meta"></span>
           </div>
+          <div class="group">
+            <span class="name">Emitter</span>
+            <span id="light-emitter" class="light off" title="Emitter"></span>
+            <span id="meta-emitter" class="meta"></span>
+          </div>
         </div>
         <span class="muted" id="ts">—</span>
         <button id="themeToggle" class="btn-small" aria-label="Alternar tema">🌓</button>
@@ -80,6 +85,7 @@
           <div class="card"><div class="title">Bridge</div><div id="bridgeCard" class="kvs"></div></div>
           <div class="card"><div class="title">Executor</div><div id="executorCard" class="kvs"></div></div>
           <div class="card"><div class="title">Retrain</div><div id="retrainCard" class="kvs"></div></div>
+          <div class="card"><div class="title">Emitter</div><div id="emitterCard" class="kvs"></div></div> <!-- NOVO -->
         </div>
 
         <div class="card" style="margin-top:16px;">
@@ -100,6 +106,7 @@
             <option value="executor">executor</option>
             <option value="retrain">retrain</option>
             <option value="watcher">watcher</option>
+            <option value="emitter">emitter</option>
             <option value="all">all</option>
           </select>
           <button class="btn-small" onclick="opsRun('start')">Start</button>
@@ -123,6 +130,7 @@
               <option value="executor">executor</option>
               <option value="retrain">retrain</option>
               <option value="watcher">watcher</option>
+              <option value="emitter">emitter</option>
             </select>
             <button id="procUpBtn" class="btn-small">Up</button>
             <button id="procDownBtn" class="btn-small">Down</button>
@@ -134,9 +142,9 @@
     </main>
 
     <!-- JS na ORDEM certa + cache-busting -->
-    <script src="/static/js/common.js?v=20251016"></script>
-    <script src="/static/js/ops.js?v=20251016"></script>
-    <script src="/static/js/dashboard.js?v=20251016"></script>
-    <script src="/static/js/control.js?v=20251016"></script>
+    <script src="/static/js/common.js?v=20251019"></script>
+    <script src="/static/js/ops.js?v=20251019"></script>
+    <script src="/static/js/dashboard.js?v=20251019"></script>
+    <script src="/static/js/control.js?v=20251019"></script>
   </body>
 </html>

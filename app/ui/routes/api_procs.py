@@ -13,7 +13,7 @@ router = APIRouter(prefix="/ui/api", tags=["ui-procs"])
 # Helpers de caminho
 # -------------------------
 def _apps_root() -> Path:
-    # 1) .env oficial do teu projeto
+    # 1) .env oficial
     env = os.getenv("PROJECT_DIR")
     if env:
         return Path(env)
@@ -34,7 +34,6 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 def _pwsh_exe() -> str:
-    # Permite override; tenta pwsh e cai para powershell
     env = os.getenv("PWSH_EXE")
     if env:
         return env
@@ -69,10 +68,12 @@ def _run(cmd: list[str] | str, cwd: Optional[Path] = None, env: Optional[Dict[st
 # -------------------------
 # Mapeamento de comandos
 # -------------------------
-def _cmd_for(target: str, action: str) -> tuple[list[str] | str, Path]:
+def _cmd_for(target: str, action: str, *, visible: bool) -> tuple[list[str] | str, Path, Dict[str, str]]:
     tgt = (target or "").strip().lower()
     act = (action or "").strip().lower()
-    if tgt not in ("all", "bridge", "executor", "retrain", "scheduler"):
+
+    valid = {"all","bridge","executor","retrain","scheduler","watcher","emitter"}
+    if tgt not in valid:
         raise HTTPException(status_code=400, detail=f"target inválido: {target}")
     if act not in ("start", "stop", "restart"):
         raise HTTPException(status_code=400, detail=f"action inválida: {action}")
@@ -93,12 +94,16 @@ def _cmd_for(target: str, action: str) -> tuple[list[str] | str, Path]:
 
     verb = {"start": "up", "stop": "down", "restart": "restart"}[act]
 
+    env = os.environ.copy()
+    if visible:
+        env["MLSL_VISIBLE"] = "on"
+
     if _is_windows():
         ps = _pwsh_exe()
         cmd = [ps, "-ExecutionPolicy", "Bypass", "-File", str(mlsl), verb, tgt]
-        return cmd, mlsl.parent
+        return cmd, mlsl.parent, env
     else:
-        return (["bash", str(mlsl), verb, tgt], mlsl.parent)
+        return (["bash", str(mlsl), verb, tgt], mlsl.parent, env)
 
 # -------------------------
 # Rotas
@@ -106,14 +111,20 @@ def _cmd_for(target: str, action: str) -> tuple[list[str] | str, Path]:
 @router.post("/proc_run")
 def proc_run(payload: Dict[str, Any]):
     """
-    Body JSON: { "target": "executor|retrain|scheduler|all", "action": "start|stop|restart" }
+    Body JSON:
+      {
+        "target": "executor|retrain|scheduler|watcher|emitter|bridge|all",
+        "action": "start|stop|restart",
+        "visible": true|false   # opcional, abre janelas (pwsh) se suportado
+      }
     Retorna SEMPRE 200 com ok=True/False e detalhes (mesmo em erro de validação).
     """
     target = str(payload.get("target") or "")
     action = str(payload.get("action") or "")
+    visible = bool(payload.get("visible", False))
 
     try:
-        cmd, cwd = _cmd_for(target, action)
+        cmd, cwd, env = _cmd_for(target, action, visible=visible)
     except HTTPException as e:
         return JSONResponse(
             {
@@ -125,7 +136,7 @@ def proc_run(payload: Dict[str, Any]):
             status_code=200,
         )
 
-    res = _run(cmd, cwd=cwd)
+    res = _run(cmd, cwd=cwd, env=env)
     rc = int(res.get("rc", -1))
     cmd_str = cmd if isinstance(cmd, str) else " ".join(shlex.quote(c) for c in cmd)
     return JSONResponse({

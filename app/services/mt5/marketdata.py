@@ -1,3 +1,4 @@
+# app/services/mt5/marketdata.py
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
 import pandas as pd
@@ -9,6 +10,7 @@ except Exception as e:
 
 from .session import MT5Session
 from .utils import TF_MAP, nt_to_dict
+
 
 class MarketData:
     def __init__(self, session: MT5Session) -> None:
@@ -61,16 +63,21 @@ class MarketData:
         tf = (tf or "H1").upper()
         if tf not in TF_MAP:
             raise RuntimeError(f"invalid tf '{tf}' (use one of {list(TF_MAP)})")
-        self.s.ensure_symbol(symbol)
+
+        # <<< RESOLVE AQUI >>>
+        symbol_mt5 = self.s.resolve_symbol(symbol)
+        self.s.ensure_symbol(symbol_mt5)
+
         tf_enum = TF_MAP[tf]
         if start or end:
             if not (start and end):
                 raise RuntimeError("provide both 'start' and 'end'")
             t0 = pd.Timestamp(start, tz="UTC").to_pydatetime()
             t1 = pd.Timestamp(end, tz="UTC").to_pydatetime()
-            rates = MT5.copy_rates_range(symbol, tf_enum, t0, t1)
+            rates = MT5.copy_rates_range(symbol_mt5, tf_enum, t0, t1)
         else:
-            rates = MT5.copy_rates_from_pos(symbol, tf_enum, 0, int(limit))
+            rates = MT5.copy_rates_from_pos(symbol_mt5, tf_enum, 0, int(limit))
+
         if rates is None or len(rates) == 0:
             return []
         df = pd.DataFrame(rates)
@@ -78,22 +85,25 @@ class MarketData:
             df["timestamp"] = pd.to_datetime(df["time"], unit="s", utc=True)
         if "tick_volume" in df.columns:
             df.rename(columns={"tick_volume": "volume"}, inplace=True)
+
         cols = [c for c in ["timestamp", "open", "high", "low", "close", "volume"] if c in df.columns]
         df = df[cols].drop_duplicates("timestamp").sort_values("timestamp").reset_index(drop=True)
+        # devolve com o símbolo ORIGINAL pedido e tf original, para consistência do bridge
         df = df.assign(symbol=symbol, timeframe=tf)
         return df.to_dict(orient="records")
-    
+
     def symbol_info(self, symbol: str):
         self.s.ensure_up()
-        self.s.ensure_symbol(symbol)
-        inf = MT5.symbol_info(symbol)
+        symbol_mt5 = self.s.resolve_symbol(symbol)
+        self.s.ensure_symbol(symbol_mt5)
+
+        inf = MT5.symbol_info(symbol_mt5)
         if inf is None:
             raise RuntimeError("symbol_info returned None")
         d = nt_to_dict(inf)
 
-        # extrato útil (devolve tudo o que existir, senão None)
         return {
-            "symbol": d.get("name") or symbol,
+            "symbol": d.get("name") or symbol_mt5,
             "path": d.get("path"),
             "trade_mode": d.get("trade_mode"),
             "digits": d.get("digits"),
@@ -113,22 +123,26 @@ class MarketData:
             "session_deals": d.get("session_deals"),
             "session_buy_orders": d.get("session_buy_orders"),
             "session_sell_orders": d.get("session_sell_orders"),
+            # também devolvemos o símbolo pedido, para UI
+            "requested_symbol": symbol,
         }
 
     def quote(self, symbol: str):
         self.s.ensure_up()
-        self.s.ensure_symbol(symbol)
-        t = MT5.symbol_info_tick(symbol)
+        symbol_mt5 = self.s.resolve_symbol(symbol)
+        self.s.ensure_symbol(symbol_mt5)
+
+        t = MT5.symbol_info_tick(symbol_mt5)
         if t is None:
             code, msg = MT5.last_error()
             raise RuntimeError(f"symbol_info_tick None ({code},{msg})")
         td = nt_to_dict(t)
 
-        # enriquecer com meta do símbolo (point/digits) para facilitar cálculos no executor
-        inf = MT5.symbol_info(symbol)
+        inf = MT5.symbol_info(symbol_mt5)
         meta = nt_to_dict(inf) if inf else {}
+
         return {
-            "symbol": symbol,
+            "symbol": symbol,  # devolve o pedido
             "time": td.get("time"),
             "bid": float(td.get("bid", 0) or 0),
             "ask": float(td.get("ask", 0) or 0),

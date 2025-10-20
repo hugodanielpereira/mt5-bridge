@@ -4,6 +4,7 @@
   const $bridge = document.getElementById('bridgeCard');
   const $exec = document.getElementById('executorCard');
   const $retr = document.getElementById('retrainCard');
+  const $emit = document.getElementById('emitterCard');     // <<< NOVO
   const $strategies = document.getElementById('strategies');
   const $yaml = document.getElementById('scheduleYaml');
   const $healthLine = document.getElementById('healthLine');
@@ -34,20 +35,11 @@
     throw lastErr || new Error('all endpoints failed');
   }
 
-  // --------------------------------------------------
-  // Load Health (bridge + executor + scheduler)
-  // --------------------------------------------------
   function setLight(el, state, title) {
     if (!el) return;
     el.classList.remove("ok","warn","bad","off");
     el.classList.add(state || "off");
     if (title) el.title = title;
-  }
-  function tier(val, okMax, warnMax) {
-    if (val == null || isNaN(val)) return "off";
-    if (val <= okMax) return "ok";
-    if (val <= warnMax) return "warn";
-    return "bad";
   }
   function fmtMeta(mem, upt) {
     if (mem == null && upt == null) return "";
@@ -56,20 +48,24 @@
     return `[${m} / ${u}]`;
   }
 
-  // --- helpers de formatação (coloca perto do topo do dashboard.js) ---
-  function fmt1(n){ const x=Number(n); return Number.isFinite(x)? x.toFixed(1) : '-'; }
-  function fmtNum(n){ const x = Number(n); if(!Number.isFinite(x)) return '-'; return (x%1===0? String(x) : x.toFixed(1)); }
-  function fmtInt(n){ const x=Number(n); return Number.isFinite(x)? String(Math.round(x)) : '-'; }
-  function fmtMin(n){ const x=Number(n); return Number.isFinite(x)? (x%1===0?String(x):x.toFixed(1)) : '-'; }
+  // --- format helpers ---
+  function fmt1(n){ const x=Number(n); return Number.isFinite(x)? x.toFixed(1) : '—'; }
+// common.js (ou onde formatas)
+function fmtNum(x) {
+  if (x === null || x === undefined) return '—';
+  const n = Number(x);
+  if (Number.isNaN(n)) return '—';
+  return n.toFixed(1); // era Math.round/parseInt -> dava 0
+}
   function fmtUptimeSec(s){
     const x = Number(s);
-    if(!Number.isFinite(x) || x < 0) return '-';
+    if(!Number.isFinite(x) || x < 0) return '—';
     const d = Math.floor(x/86400), h = Math.floor((x%86400)/3600), m = Math.floor((x%3600)/60);
     if (d>0) return `${d}d ${h}h`;
     if (h>0) return `${h}h ${m}m`;
     return `${m}m`;
   }
-  function nice(v){ return (v===0 || v==='0') ? '0' : (v==null ? '—' : v); }
+  const basename = p => (p || '').split(/[\\/]/).pop() || '—';
 
   // --- helper: mostrar um log na caixa "Logs" ---
   async function showLog(name = 'retrain.log', n = 300){
@@ -96,7 +92,6 @@
       _refreshLeft -= 1;
       if (_refreshLeft < 0){
         _refreshLeft = T;
-        // dispara refresh como se fosse clique no botão
         document.getElementById('refreshBtn')?.click();
       }
     }
@@ -106,7 +101,7 @@
   }
 
   // -------------------------------------------------------
-  // loadHealth — bridge + executor + scheduler + watcher + lights
+  // loadHealth — bridge + executor + scheduler + watcher + emitter
   // -------------------------------------------------------
   async function loadHealth(){
     try{
@@ -120,7 +115,7 @@
       kv($bridge, [
         ['Status',  bOk ? 'OK' : 'OFF', bOk ? 'ok' : 'bad'],
         ['PID',     b.pid ?? '—'],
-        ['Uptime',  b.uptime_s != null ? fmtUptimeSec(b.uptime_s) : '—'],
+        ['Uptime',  fmtUptimeSec(b.uptime_s)],
         ['CPU (s)', b.cpu_s != null ? Math.round(b.cpu_s) : '—'],
         ['Mem (MB)',b.mem_mb != null ? Math.round(b.mem_mb) : '—'],
       ]);
@@ -137,10 +132,11 @@
       const e = s?.executor || {};
       kv($exec, [
         ['PID', e.pid ?? '—'],
-        ['CPU (s)', e.cpu_s != null ? fmt1(e.cpu_s) : '—'],
+        ['CPU (s)', fmt1(e.cpu_s)],
         ['Mem (MB)', e.mem_mb != null ? Math.round(e.mem_mb) : '—'],
         ['Log age (min)', e.log_age_min != null ? e.log_age_min : '—'],
-        ['Uptime', e.uptime_s != null ? fmtUptimeSec(e.uptime_s) : '—'],
+        ['Log file', basename(e.log_file)],
+        ['Uptime', fmtUptimeSec(e.uptime_s)],
       ]);
       const eState = (e.fresh === false) ? 'bad' : (e.pid ? 'ok' : 'off');
       setLight(document.getElementById('light-exec'), eState, 'Executor');
@@ -154,10 +150,11 @@
       const r = s?.retrain || {};
       kv($retr, [
         ['PID', r.pid ?? '—'],
-        ['CPU (s)', r.cpu_s != null ? fmt1(r.cpu_s) : '—'],
+        ['CPU (s)', fmt1(r.cpu_s)],
         ['Mem (MB)', r.mem_mb != null ? Math.round(r.mem_mb) : '—'],
         ['Log age (min)', r.log_age_min != null ? r.log_age_min : '—'],
-        ['Uptime', r.uptime_s != null ? fmtUptimeSec(r.uptime_s) : '—'],
+        ['Log file', basename(r.log_file)],
+        ['Uptime', fmtUptimeSec(r.uptime_s)],
         ['Locks', (Array.isArray(r.locks) && r.locks.length) ? r.locks.join(', ') : 'none'],
       ]);
       const rState = (r.fresh === false) ? 'warn' : (r.pid ? 'ok' : 'off');
@@ -178,13 +175,34 @@
         w.uptime_s != null ? Math.round(w.uptime_s) : null
       );
 
+      // ---------- EMITTER (NOVO) ----------
+      const m = s?.emitter || {};
+      if ($emit){
+        kv($emit, [
+          ['PID', m.pid ?? '—'],
+          ['CPU (s)', fmt1(m.cpu_s)],
+          ['Mem (MB)', m.mem_mb != null ? Math.round(m.mem_mb) : '—'],
+          ['Log age (min)', m.log_age_min != null ? m.log_age_min : '—'],
+          ['Log file', basename(m.log_file)],
+          ['Uptime', fmtUptimeSec(m.uptime_s)],
+        ]);
+      }
+      const mState = (m.fresh === false) ? 'warn' : (m.pid ? 'ok' : 'off');
+      setLight(document.getElementById('light-emitter'), mState, 'Emitter');
+      const mMeta = document.getElementById('meta-emitter');
+      if (mMeta) mMeta.textContent = fmtMeta(
+        m.mem_mb != null ? Math.round(m.mem_mb) : null,
+        m.uptime_s != null ? Math.round(m.uptime_s) : null
+      );
+
       // ---------- TOP BANNER ----------
       const banner = document.getElementById("globalStatus");
       if (banner){
         let state='ok', msg='✅ Serviços operacionais';
-        if (!bOk)                 { state='bad';  msg='❌ Bridge inativo'; }
-        else if (e.fresh === false){ state='bad';  msg='⚠️ Executor sem atividade recente'; }
-        else if (r.fresh === false){ state='warn'; msg='ℹ️ Retrain parado / em espera'; }
+        if (!bOk)                   { state='bad';  msg='❌ Bridge inativo'; }
+        else if (e.fresh === false) { state='bad';  msg='⚠️ Executor sem atividade recente'; }
+        else if (m.fresh === false) { state='warn'; msg='ℹ️ Emitter inativo / em espera'; }
+        else if (r.fresh === false) { state='warn'; msg='ℹ️ Retrain parado / em espera'; }
 
         banner.className = `status-banner ${state}`;
         let right = document.getElementById('globalStatusCountdown');
@@ -208,11 +226,13 @@
       kv($bridge, [['Status','OFF','bad']]);
       kv($exec,   [['PID','—'],['CPU (s)','—'],['Mem (MB)','—'],['Log age (min)','—'],['Uptime','—']]);
       kv($retr,   [['PID','—'],['CPU (s)','—'],['Mem (MB)','—'],['Log age (min)','—'],['Uptime','—'],['Locks','—']]);
+      if ($emit){ kv($emit,[['PID','—'],['CPU (s)','—'],['Mem (MB)','—'],['Log age (min)','—'],['Uptime','—']]); }
       setLight(document.getElementById('light-bridge'),'off');
       setLight(document.getElementById('light-exec'),'off');
       setLight(document.getElementById('light-retrain'),'off');
       setLight(document.getElementById('light-watcher'),'off');
-      ['meta-bridge','meta-exec','meta-retrain','meta-watcher'].forEach(id=>{
+      setLight(document.getElementById('light-emitter'),'off');
+      ['meta-bridge','meta-exec','meta-retrain','meta-watcher','meta-emitter'].forEach(id=>{
         const el=document.getElementById(id); if(el) el.textContent='';
       });
     }
@@ -334,7 +354,9 @@
     try{
       const j = await api('/retrain_run_due', {method:'POST'});
       appendOut(JSON.stringify(j,null,2));
-      await showLog('retrain.log', 400);   // <- mostra log automaticamente
+      const st = await api('/status');
+      const lf = st?.retrain?.log_file || 'scheduler_retrain.log';
+      await showLog(basename(lf), 400);
       await refreshAll();
     }catch(e){ appendOut('erro: '+e); }
   });
@@ -343,7 +365,9 @@
     try{
       const j = await api('/retrain_run_all', {method:'POST'});
       appendOut(JSON.stringify(j,null,2));
-      await showLog('retrain.log', 400);   // <- mostra log automaticamente
+      const st = await api('/status');
+      const lf = st?.retrain?.log_file || 'scheduler_retrain.log';
+      await showLog(basename(lf), 400);
       await refreshAll();
     }catch(e){ appendOut('erro: '+e); }
   });
@@ -361,7 +385,7 @@
   });
 
   async function proc(action){
-    const tgt = document.getElementById('procTarget').value;
+    const tgt = document.getElementById('procTarget').value; // garante que o <select> inclui "emitter"
     try{
       const j = await api('/proc_run', {
         method:'POST',
@@ -382,7 +406,7 @@
   await refreshAll();
   startAutoRefresh(true);
 
-  // ====== LOG VIEWER (injeta controlos simples acima da caixa "Logs") =========
+  // ====== LOG VIEWER (com emitter) =========
   (function(){
     const logsCard = document.querySelector('#strategies')?.closest('.card')?.nextElementSibling;
     const logArea = document.getElementById('out');
@@ -419,15 +443,14 @@
           o.textContent = f.name;
           sel.appendChild(o);
         });
-        // fallback default if empty list
+        // fallback default if vazio
         if (!sel.value){
-          ['executor.log','scheduler_retrain.log','retrain.log','risk_manager.log','watch_signals.log'].forEach(n=>{
+          ['executor.log','scheduler_retrain.log','retrain.log','risk_manager.log','watch_signals.log','emitter.log'].forEach(n=>{
             const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
           });
         }
       }catch(e){
-        // if listing fails, still allow manual known names
-        ['executor.log','scheduler_retrain.log','retrain.log','risk_manager.log','watch_signals.log'].forEach(n=>{
+        ['executor.log','scheduler_retrain.log','retrain.log','risk_manager.log','watch_signals.log','emitter.log'].forEach(n=>{
           const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
         });
       }

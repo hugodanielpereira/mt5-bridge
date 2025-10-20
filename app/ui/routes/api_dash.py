@@ -6,8 +6,7 @@ import shlex
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, List
-from urllib.parse import quote
+from typing import Any, Dict, Optional, List, Tuple
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -28,6 +27,7 @@ def _apps_root() -> Path:
         return Path(env2)
     # 3) heurística
     here = Path(__file__).resolve()
+    # .../app/ui/routes/api_dash.py  -> parents[4] ~ .../apps/bridges/mt5-bridge/app/ui/routes
     bridges_dir = here.parents[4]
     root = bridges_dir.parent
     return root / "apps" / "ml-strategy-lab"
@@ -181,6 +181,12 @@ def _pid_candidates(role: str) -> List[Path]:
             PID_DIR_RUNS / "watcher.pid",
             PID_DIR_RUNS / "mlsl-watcher.pid",
         ]
+    elif r == "emitter":
+        cands += [
+            PID_DIR_PIDS / "mlsl-emitter.pid",
+            PID_DIR_RUNS / "emitter.pid",
+            PID_DIR_RUNS / "mlsl-emitter.pid",
+        ]
     return cands
 
 def _read_pid_multi(role: str) -> Optional[int]:
@@ -261,7 +267,6 @@ def _promote_to_child_with_needles(p, needles: List[str]):
         return p
     needles_lc = [n.lower() for n in needles if n]
     try:
-        # procura recursivamente: primeiro nível costuma ser suficiente
         for ch in p.children(recursive=True):
             try:
                 cl = " ".join(ch.cmdline()) if hasattr(ch, "cmdline") else ""
@@ -285,6 +290,17 @@ def _locate_proc(pid: Optional[int], needles: List[str]):
         p = _find_proc(needles)
     if p:
         p = _promote_to_child_with_needles(p, needles)
+    return p
+
+# === util partilhado: join seguro ==================================
+def _safe_join(base: Path, name: str) -> Path:
+    """
+    Join `name` to `base` safely (no traversal). Only basename is honored.
+    """
+    p = (base / Path(name).name).resolve()
+    base_res = base.resolve()
+    if not str(p).startswith(str(base_res)):
+        raise HTTPException(status_code=400, detail="invalid path")
     return p
 
 # ---------------------------------------------------
@@ -369,19 +385,24 @@ LOGS_DIR  = _apps_root() / "outputs" / "live" / "logs"
 
 def _log_age_min(path: Path) -> Optional[float]:
     try:
-        if not path.exists(): 
+        if not path.exists():
             return None
         return round((time.time() - path.stat().st_mtime)/60.0, 1)
     except Exception:
         return None
 
-def _bridge_proc():
-    # procura o uvicorn do bridge
-    return _find_proc([
-        "uvicorn app.main:app",   # forma que estás a lançar
-        "uvicorn app.main",       # fallback
-        "app.main:app",           # extra
-    ])
+def _log_age_min_multi(base: Path, names: list[str]) -> tuple[Optional[float], Optional[str]]:
+    """
+    Devolve (age_min, file_used) do primeiro ficheiro existente em 'names'
+    (ordem de prioridade) calculado a partir de 'base'. Se nenhum existir,
+    devolve (None, None).
+    """
+    for name in names:
+        p = base / name
+        age = _log_age_min(p)
+        if age is not None:
+            return age, str(p)
+    return None, None
 
 @router.get("/status")
 def status():
@@ -397,37 +418,62 @@ def status():
     except Exception as e:
         bridge_diag = {"ok": False, "reason": f"diag_failed: {e}"}
 
-    # métricas do processo do bridge (uvicorn)
-    bp = _find_proc([
+    # tenta primeiro por pidfile; cai para cmdline; promove se for wrapper
+    bridge_pid = _read_pid("mlsl-bridge.pid")
+    bridge_needles = [
         "uvicorn app.main:app",
         "uvicorn app.main",
+        "-m uvicorn",
         "app.main:app",
-    ])
-    bmet = _proc_metrics(bp) if bp else {"pid": None, "cpu_s": None, "mem_mb": None, "uptime_s": None}
+        "app\\main.py",
+    ]
+    bp = _locate_proc(bridge_pid, bridge_needles) or _find_proc(bridge_needles)
+    def _pmet(p): return _proc_metrics(p) if p else {"pid": None, "cpu_s": None, "mem_mb": None, "uptime_s": None}
+    bmet = _pmet(bp)
 
     # --- EXECUTOR ---
     exec_pid = _read_pid("mlsl-executor.pid") or _read_pid_multi("executor")
     exec_needles = ["services.executor.loop", "executor.loop", "run_execute_live_mt5"]
     pe = _locate_proc(exec_pid, exec_needles)
-    exec_info = _proc_metrics(pe) if pe else {"pid": None, "cpu_s": None, "mem_mb": None, "uptime_s": None}
-    exec_log_age = _log_age_min(LOGS_DIR / "executor.log")
-    exec_fresh = (exec_log_age is not None) and (exec_log_age <= float(os.getenv("EXEC_FRESH_MAX_AGE_MIN","5")))
+    exec_info = _pmet(pe)
+    exec_age, exec_file = _log_age_min_multi(
+        _logs_dir(),
+        ["executor.log", "executor.stdout.log", "executor.stderr.log"]
+    )
+    exec_fresh = (exec_age is not None) and (exec_age <= float(os.getenv("EXEC_FRESH_MAX_AGE_MIN","5")))
 
     # --- RETRAIN ---
     retr_pid = _read_pid("mlsl-retrain.pid") or _read_pid_multi("retrain")
     retr_needles = ["services.scheduler_retrain", "scheduler_retrain", "tools.retrain_incremental"]
     pr = _locate_proc(retr_pid, retr_needles)
-    retr_info = _proc_metrics(pr) if pr else {"pid": None, "cpu_s": None, "mem_mb": None, "uptime_s": None}
-    retr_log_age = _log_age_min(LOGS_DIR / "scheduler_retrain.log")
-    retr_fresh = (retr_log_age is not None) and (retr_log_age <= float(os.getenv("SCHED_FRESH_MAX_AGE_MIN","10")))
+    retr_info = _pmet(pr)
+    retr_age, retr_file = _log_age_min_multi(
+        _logs_dir(),
+        ["scheduler_retrain.log", "scheduler_retrain.stdout.log", "scheduler_retrain.stderr.log"]
+    )
+    retr_fresh = (retr_age is not None) and (retr_age <= float(os.getenv("SCHED_FRESH_MAX_AGE_MIN","10")))
 
     # --- WATCHER ---
     watch_pid = _read_pid_multi("watcher")
     watch_needles = ["tools.watch_signals", "watch_signals.py", "watcher"]
     wp = _locate_proc(watch_pid, watch_needles) or _find_proc(watch_needles)
-    wmet = _proc_metrics(wp) if wp else {"pid": None, "cpu_s": None, "mem_mb": None, "uptime_s": None}
-    watch_log_age = _file_age_min(_logs_dir() / "watch_signals.log")
-    watch_fresh = bool(wmet.get("pid")) or (watch_log_age is not None and watch_log_age <= 5)
+    wmet = _pmet(wp)
+    watch_age, watch_file = _log_age_min_multi(
+        _logs_dir(),
+        ["watch_signals.log", "watch_signals.stdout.log", "watch_signals.stderr.log"]
+    )
+    watch_fresh = bool(wmet.get("pid")) or (watch_age is not None and watch_age <= int(os.getenv("WATCH_FRESH_MAX_AGE_MIN","5")))
+
+    # --- EMITTER ---
+    emit_pid = _read_pid("mlsl-emitter.pid") or _read_pid_multi("emitter")
+    emit_needles = ["services.emitter.loop", "emitter.loop"]
+    ep = _locate_proc(emit_pid, emit_needles) or _find_proc(emit_needles)
+    emet = _pmet(ep)
+    emitter_age, emitter_file = _log_age_min_multi(
+        _logs_dir(),
+        ["emitter.log", "emitter.stdout.log", "emitter.stderr.log"]
+    )
+    emitter_fresh = bool(emet.get("pid")) or (emitter_age is not None and emitter_age <= int(os.getenv("EMITTER_FRESH_MAX_AGE_MIN","5")))
 
     return {
         "bridge": {
@@ -439,22 +485,41 @@ def status():
             "uptime_s": bmet.get("uptime_s"),
         },
         "executor": {
-            "pid": exec_info.get("pid"), "cpu_s": exec_info.get("cpu_s"),
-            "mem_mb": exec_info.get("mem_mb"), "uptime_s": exec_info.get("uptime_s"),
-            "log_age_min": exec_log_age, "fresh": exec_fresh
+            "pid": exec_info.get("pid"),
+            "cpu_s": exec_info.get("cpu_s"),
+            "mem_mb": exec_info.get("mem_mb"),
+            "uptime_s": exec_info.get("uptime_s"),
+            "log_age_min": exec_age,
+            "fresh": exec_fresh,
+            "log_file": exec_file,
         },
         "retrain": {
-            "pid": retr_info.get("pid"), "cpu_s": retr_info.get("cpu_s"),
-            "mem_mb": retr_info.get("mem_mb"), "uptime_s": retr_info.get("uptime_s"),
-            "log_age_min": retr_log_age, "fresh": retr_fresh, "locks": []
+            "pid": retr_info.get("pid"),
+            "cpu_s": retr_info.get("cpu_s"),
+            "mem_mb": retr_info.get("mem_mb"),
+            "uptime_s": retr_info.get("uptime_s"),
+            "log_age_min": retr_age,
+            "fresh": retr_fresh,
+            "log_file": retr_file,
+            "locks": [],
         },
         "watcher": {
             "pid": wmet.get("pid"),
             "cpu_s": wmet.get("cpu_s"),
             "mem_mb": wmet.get("mem_mb"),
             "uptime_s": wmet.get("uptime_s"),
-            "log_age_min": watch_log_age,
+            "log_age_min": watch_age,
             "fresh": watch_fresh,
+            "log_file": watch_file,
+        },
+        "emitter": {
+            "pid": emet.get("pid"),
+            "cpu_s": emet.get("cpu_s"),
+            "mem_mb": emet.get("mem_mb"),
+            "uptime_s": emet.get("uptime_s"),
+            "log_age_min": emitter_age,
+            "fresh": emitter_fresh,
+            "log_file": emitter_file,
         },
     }
 
@@ -531,11 +596,15 @@ def schedule_yaml():
 
 @router.get("/executor_state")
 def executor_state():
+    # fresh por idade de log (com fallbacks)
     fresh_min = int(os.getenv("EXEC_FRESH_MAX_AGE_MIN", "5"))
-    log = _logs_dir() / "executor.log"
-    age_min = _file_age_min(log)
+    age_min, used = _log_age_min_multi(
+        _logs_dir(),
+        ["executor.log", "executor.stdout.log", "executor.stderr.log"]
+    )
     fresh = (age_min is not None) and (age_min <= fresh_min)
 
+    # métricas do processo
     pid = _read_pid_multi("executor")
     p = _proc_from_pid(pid) or _find_proc([
         "services.executor.loop", "executor.loop", "run_execute_live_mt5"
@@ -545,6 +614,7 @@ def executor_state():
     return {
         "fresh": fresh if age_min is not None else bool(met.get("pid")),
         "age_min": age_min,
+        "log_file": used,
         "last_signal_ts": None,
         "pid": met.get("pid"),
         "cpu_s": met.get("cpu_s"),
@@ -555,8 +625,10 @@ def executor_state():
 @router.get("/scheduler_state")
 def scheduler_state():
     fresh_min = int(os.getenv("SCHED_FRESH_MAX_AGE_MIN", "10"))
-    log = _logs_dir() / "scheduler_retrain.log"
-    age_min = _file_age_min(log)
+    age_min, used = _log_age_min_multi(
+        _logs_dir(),
+        ["scheduler_retrain.log", "scheduler_retrain.stdout.log", "scheduler_retrain.stderr.log"]
+    )
     fresh = (age_min is not None) and (age_min <= fresh_min)
 
     pid = _read_pid_multi("retrain")
@@ -577,6 +649,7 @@ def scheduler_state():
     return {
         "fresh": fresh if age_min is not None else bool(met.get("pid")),
         "age_min": age_min,
+        "log_file": used,
         "locks": locks,
         "pid": met.get("pid"),
         "cpu_s": met.get("cpu_s"),
@@ -588,12 +661,34 @@ def scheduler_state():
 def watcher_state():
     p = _find_proc(["tools.watch_signals", "watch_signals.py", "watcher"])
     met = _proc_metrics(p) if p else {}
-    log = _logs_dir() / "watch_signals.log"
-    age_min = _file_age_min(log)
-    fresh = bool(met.get("pid")) or (age_min is not None and age_min <= 5)
+    age_min, used = _log_age_min_multi(
+        _logs_dir(),
+        ["watch_signals.log", "watch_signals.stdout.log", "watch_signals.stderr.log"]
+    )
+    fresh = bool(met.get("pid")) or (age_min is not None and age_min <= int(os.getenv("WATCH_FRESH_MAX_AGE_MIN","5")))
     return {
         "fresh": fresh,
         "age_min": age_min,
+        "log_file": used,
+        "pid": met.get("pid"),
+        "cpu_s": met.get("cpu_s"),
+        "mem_mb": met.get("mem_mb"),
+        "uptime_s": met.get("uptime_s"),
+    }
+
+@router.get("/emitter_state")
+def emitter_state():
+    p = _find_proc(["services.emitter.loop", "emitter.loop"])
+    met = _proc_metrics(p) if p else {}
+    age_min, used = _log_age_min_multi(
+        _logs_dir(),
+        ["emitter.log", "emitter.stdout.log", "emitter.stderr.log"]
+    )
+    fresh = bool(met.get("pid")) or (age_min is not None and age_min <= int(os.getenv("EMITTER_FRESH_MAX_AGE_MIN","5")))
+    return {
+        "fresh": fresh,
+        "age_min": age_min,
+        "log_file": used,
         "pid": met.get("pid"),
         "cpu_s": met.get("cpu_s"),
         "mem_mb": met.get("mem_mb"),
@@ -603,30 +698,6 @@ def watcher_state():
 # === Logs & Failed Signals =========================================
 LOG_DIR    = _apps_root() / "outputs" / "live" / "logs"
 FAILED_DIR = _apps_root() / "outputs" / "live" / "signals" / "failed"
-
-def _safe_join(base: Path, name: str) -> Path:
-    """
-    Join `name` to `base` safely (no traversal). Only basename is honored.
-    """
-    p = (base / Path(name).name).resolve()
-    base_res = base.resolve()
-    if not str(p).startswith(str(base_res)):
-        raise HTTPException(status_code=400, detail="invalid path")
-    return p
-
-def _tail_text(path: Path, n: int = 200) -> str:
-    """
-    Simple tail for small/medium logs. Returns last N lines.
-    """
-    try:
-        if not path.exists():
-            return f"[{path}] não encontrado."
-        txt = path.read_text(encoding="utf-8", errors="replace")
-        lines = txt.splitlines()
-        n = max(1, int(n))
-        return "\n".join(lines[-n:])
-    except Exception as e:
-        return f"Erro a ler {path}: {e}"
 
 @router.get("/logs/list")
 def logs_list():
@@ -663,9 +734,22 @@ def logs_list():
 
 @router.get("/logs/get")
 def logs_get(name: str = "executor.log", n: int = 200):
-    from fastapi.responses import PlainTextResponse
     p = _safe_join(LOG_DIR, name)
     return PlainTextResponse(_tail_text(p, n))
+
+def _tail_text(path: Path, n: int = 200) -> str:
+    """
+    Simple tail for small/medium logs. Returns last N lines.
+    """
+    try:
+        if not path.exists():
+            return f"[{path}] não encontrado."
+        txt = path.read_text(encoding="utf-8", errors="replace")
+        lines = txt.splitlines()
+        n = max(1, int(n))
+        return "\n".join(lines[-n:])
+    except Exception as e:
+        return f"Erro a ler {path}: {e}"
 
 @router.get("/failed/list")
 def failed_list(limit: int = 50):
@@ -673,16 +757,14 @@ def failed_list(limit: int = 50):
     if not FAILED_DIR.exists():
         return {"dir": str(FAILED_DIR), "items": items}
 
-    # list only *.json.work; pair with possible *.error.txt
     cand = list(FAILED_DIR.glob("*.json.work"))
-    # newest first
     cand.sort(key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True)
     for f in cand[: max(1, int(limit))]:
         try:
             st = f.stat()
         except Exception:
             continue
-        err = FAILED_DIR / (f.name + ".error.txt")  # e.g., *.json.work.error.txt
+        err = FAILED_DIR / (f.name + ".error.txt")
         rec: dict[str, Any] = {
             "file": f.name,
             "mtime": st.st_mtime,
@@ -703,8 +785,6 @@ def failed_list(limit: int = 50):
 
 @router.get("/failed/get")
 def failed_get(file: str):
-    from fastapi.responses import PlainTextResponse
-    # Allow reading both *.json.work and its *.error.txt companion
     p = _safe_join(FAILED_DIR, file)
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="ficheiro não encontrado")
@@ -733,14 +813,12 @@ def failed_retry(payload: Dict[str, Any]):
 
     dst = inbox / name.replace(".json.work", ".json")
     try:
-        # overwrite if exists (idempotent retry)
         if dst.exists():
             dst.unlink(missing_ok=True)  # type: ignore[arg-type]
         src.replace(dst)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"falha a mover para inbox: {e}")
 
-    # move the paired error to archive (if present)
     err = _safe_join(FAILED_DIR, name + ".error.txt")
     if err.exists():
         arch = _signals_dir() / "archive"
@@ -748,47 +826,33 @@ def failed_retry(payload: Dict[str, Any]):
         try:
             err.replace(arch / err.name)
         except Exception:
-            # best-effort: ignore
             pass
 
     return {"ok": True, "moved_to": str(dst)}
 
-# === Viewers (Schedule & Configs) ===========================================
-CONFIGS_DIR = _apps_root() / "outputs" / "live" / "configs"
-
-def _safe_join(base: Path, name: str) -> Path:
-    """
-    Join `name` to `base` safely (no traversal). Only basename is honored.
-    """
-    p = (base / Path(name).name).resolve()
-    base_res = base.resolve()
-    if not str(p).startswith(str(base_res)):
-        raise HTTPException(status_code=400, detail="invalid path")
-    return p
-
+# --- NOVO: abrir o retrain.yaml diretamente (usado pelo botão "Ver Schedule")
 @router.get("/view_schedule")
 def view_schedule():
-    """
-    Mostra o retrain.yaml (texto puro). Usado pelo botão 'Ver Schedule'.
-    """
     p = _schedule_file()
     if not p.exists():
         return PlainTextResponse("retrain.yaml não encontrado", status_code=404)
-    return PlainTextResponse(p.read_text(encoding="utf-8", errors="replace"))
+    return PlainTextResponse(p.read_text(encoding="utf-8"))
+
+# --- NOVO: abrir um config YAML arbitrário (usado pelo link "Ver cfg" na tabela)
+def _configs_dir() -> Path:
+    env = os.getenv("CONFIGS_DIR")
+    if env:
+        return Path(env)
+    return _apps_root() / "outputs" / "live" / "configs"
 
 @router.get("/view_config")
 def view_config(file: str):
-    """
-    Mostra um ficheiro de config individual a partir de outputs/live/configs.
-    Ex.: ?file=BTCUSDT_H2.yaml
-    """
-    if not CONFIGS_DIR.exists():
-        raise HTTPException(status_code=404, detail="configs dir não encontrado")
-    path = _safe_join(CONFIGS_DIR, file)
-    if not path.exists() or not path.is_file():
+    base = _configs_dir()
+    p = _safe_join(base, file)
+    if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="config não encontrado")
     try:
-        txt = path.read_text(encoding="utf-8", errors="replace")
+        txt = p.read_text(encoding="utf-8", errors="replace")
     except Exception:
-        txt = path.read_text(encoding="latin-1", errors="replace")
+        txt = p.read_text(encoding="latin-1", errors="replace")
     return PlainTextResponse(txt)

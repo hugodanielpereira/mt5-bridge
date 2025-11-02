@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 router = APIRouter(prefix="/ui/api", tags=["ui-dash"])
@@ -523,53 +523,95 @@ def status():
         },
     }
 
+# --- colar no app/ui/routes/api_dash.py (substitui o def strategies) ---
+def _configs_dir() -> Path:
+    env = os.getenv("CONFIGS_DIR")
+    if env:
+        return Path(env)
+    return _apps_root() / "outputs" / "live" / "configs"
+
+def _yaml_safe(p: Path):
+    try:
+        import yaml
+        return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
 @router.get("/strategies")
-def strategies():
+def strategies(include: str = Query("schedule", description="schedule|configs|both")):
+    include_set = {s.strip().lower() for s in include.split(",") if s.strip()}
+    if not include_set:
+        include_set = {"schedule"}
+
     path = _schedule_file()
     rows: list[dict[str, Any]] = []
+    scheduled_keys: set[str] = set()
 
-    # 1) Lê schedule YAML
+    # 1) Sempre: ler o schedule
     if path.exists():
         try:
-            import yaml  # opcional
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) if yaml else None
+            import yaml
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
             for j in (data or {}).get("jobs", []):
                 sym = j.get("symbol") or j.get("mt5_symbol") or j.get("instrument")
                 tf  = j.get("timeframe")
                 win = j.get("retrain_every_minutes")
+                key = _norm_key(sym, tf)
+                scheduled_keys.add(key)
                 rows.append({
                     "symbol": sym,
                     "timeframe": tf,
                     "source": "schedule",
                     "window_min": win,
-                    "last_run_min": None,   # preenchido no passo 2
-                    "due": None,            # preenchido no passo 2
-                    "next_in_min": None,    # preenchido no passo 2
+                    "last_run_min": None,
+                    "due": None,
+                    "next_in_min": None,
                     "config_file": j.get("config_file"),
                     "source_url": None,
                 })
         except Exception:
             rows = []
 
-    # 2) Enriquecer com timestamps → fallback para mtime do ficheiro MAIS RECENTE
+    # 2) Opcional: incluir órfãos do diretório de configs
+    if "configs" in include_set or "both" in include_set:
+        cfg_dir = _configs_dir()
+        for p in sorted(cfg_dir.glob("*_config.yaml")):
+            # inferir symbol/timeframe a partir do nome
+            stem = p.stem  # ex: XAUUSD_M15_config
+            base = stem[:-7] if stem.endswith("_config") else stem
+            if "_" not in base:
+                continue
+            sym, tf = base.split("_", 1)
+            key = _norm_key(sym, tf)
+            if key in scheduled_keys:
+                continue  # já está no schedule
+            rows.append({
+                "symbol": sym,
+                "timeframe": tf,
+                "source": "configs",
+                "window_min": None,
+                "last_run_min": None,
+                "due": None,
+                "next_in_min": None,
+                "config_file": str(p),
+                "source_url": None,
+            })
+
+    # 3) Enriquecer last_run/next_in para os do schedule (como já fazias)
     last_map = _load_last_runs()
     now = time.time()
     for r in rows:
+        if r["source"] != "schedule":
+            continue
         key = _norm_key(r.get("symbol"), r.get("timeframe"))
         last_ts = last_map.get(key)
-
         if not last_ts:
             latest_dir = _models_latest_dir(r.get("symbol"), r.get("timeframe"))
             if latest_dir.exists():
                 try:
-                    most_recent = max(
-                        (f.stat().st_mtime for f in latest_dir.rglob('*') if f.is_file()),
-                        default=None
-                    )
-                    last_ts = most_recent
+                    last_ts = max((f.stat().st_mtime for f in latest_dir.rglob('*') if f.is_file()), default=None)
                 except Exception:
                     last_ts = None
-
         if last_ts:
             last_min = int((now - float(last_ts)) // 60)
             r["last_run_min"] = max(0, last_min)
@@ -578,12 +620,6 @@ def strategies():
                 next_in = int(max(0, float(win) - last_min))
                 r["next_in_min"] = next_in
                 r["due"] = next_in == 0
-            else:
-                r["due"] = None
-        else:
-            r["last_run_min"] = None
-            r["next_in_min"] = None
-            r["due"] = None
 
     return {"rows": rows}
 

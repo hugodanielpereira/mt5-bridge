@@ -1,10 +1,15 @@
 // app/ui/static/js/dashboard.js
 (async function(){
+  // ==== refs a elementos existentes no HTML ====
   const $ts = document.getElementById('ts');
   const $bridge = document.getElementById('bridgeCard');
   const $exec = document.getElementById('executorCard');
   const $retr = document.getElementById('retrainCard');
-  const $emit = document.getElementById('emitterCard');     // <<< NOVO
+  const $watch = document.getElementById('watcherCard');   // opcional (se existir no HTML)
+  const $emit  = document.getElementById('emitterCard');   // opcional
+  const $gov   = document.getElementById('governorCard');  // opcional
+  const $prom  = document.getElementById('promoterCard');  // opcional
+
   const $strategies = document.getElementById('strategies');
   const $yaml = document.getElementById('scheduleYaml');
   const $healthLine = document.getElementById('healthLine');
@@ -13,6 +18,18 @@
   // --------------------------------------------------
   // Helpers
   // --------------------------------------------------
+  async function _fetchExecutorState() {
+    try { return await api('/executor_state'); } catch(_){ return {}; }
+  }
+  async function _fetchSchedulerState() {
+    try { return await api('/scheduler_state'); } catch(_){ return {}; }
+  }
+
+  // “é vazio/zero?” — útil para decidir quando usar fallback
+  function _isMissingNum(x) {
+    return x === null || x === undefined || (typeof x === 'number' && !isFinite(x));
+  }
+
   function kv(container, rows){
     if (!container) return;
     container.innerHTML = '';
@@ -24,23 +41,13 @@
     });
   }
 
-  async function fetchJsonWithFallback(paths){
-    let lastErr;
-    for (const p of paths){
-      try{
-        const data = await api(p);
-        return data;
-      }catch(e){ lastErr=e; }
-    }
-    throw lastErr || new Error('all endpoints failed');
-  }
-
   function setLight(el, state, title) {
     if (!el) return;
     el.classList.remove("ok","warn","bad","off");
     el.classList.add(state || "off");
     if (title) el.title = title;
   }
+
   function fmtMeta(mem, upt) {
     if (mem == null && upt == null) return "";
     const m = mem != null ? `${Math.round(mem)} MB` : "–";
@@ -48,15 +55,7 @@
     return `[${m} / ${u}]`;
   }
 
-  // --- format helpers ---
   function fmt1(n){ const x=Number(n); return Number.isFinite(x)? x.toFixed(1) : '—'; }
-// common.js (ou onde formatas)
-function fmtNum(x) {
-  if (x === null || x === undefined) return '—';
-  const n = Number(x);
-  if (Number.isNaN(n)) return '—';
-  return n.toFixed(1); // era Math.round/parseInt -> dava 0
-}
   function fmtUptimeSec(s){
     const x = Number(s);
     if(!Number.isFinite(x) || x < 0) return '—';
@@ -66,6 +65,9 @@ function fmtNum(x) {
     return `${m}m`;
   }
   const basename = p => (p || '').split(/[\\/]/).pop() || '—';
+
+  // usa fmtNum do common.js (não redefinir aqui)
+  const fmtNumSafe = (x)=> (typeof window.fmtNum==='function' ? window.fmtNum(x) : fmt1(x));
 
   // --- helper: mostrar um log na caixa "Logs" ---
   async function showLog(name = 'retrain.log', n = 300){
@@ -101,7 +103,7 @@ function fmtNum(x) {
   }
 
   // -------------------------------------------------------
-  // loadHealth — bridge + executor + scheduler + watcher + emitter
+  // loadHealth — bridge + executor + retrain + watcher + emitter (+ gov/prom se existirem)
   // -------------------------------------------------------
   async function loadHealth(){
     try{
@@ -111,7 +113,6 @@ function fmtNum(x) {
       // ---------- BRIDGE ----------
       const b = s?.bridge || {};
       const bOk = !!b.ok || !!b.diag?.ok;
-
       kv($bridge, [
         ['Status',  bOk ? 'OK' : 'OFF', bOk ? 'ok' : 'bad'],
         ['PID',     b.pid ?? '—'],
@@ -120,7 +121,6 @@ function fmtNum(x) {
         ['Mem (MB)',b.mem_mb != null ? Math.round(b.mem_mb) : '—'],
       ]);
       if ($healthLine) $healthLine.textContent = 'Bridge=' + (bOk ? 'OK' : 'FAIL');
-
       setLight(document.getElementById('light-bridge'), bOk ? 'ok' : 'bad', 'Bridge');
       const bMeta = document.getElementById('meta-bridge');
       if (bMeta) bMeta.textContent = fmtMeta(
@@ -129,7 +129,22 @@ function fmtNum(x) {
       );
 
       // ---------- EXECUTOR ----------
-      const e = s?.executor || {};
+      let e = s?.executor || {};
+      // fallback: se estiverem a faltar métricas, tenta /executor_state
+      if (!e || (!e.pid && (_isMissingNum(e.cpu_s) || _isMissingNum(e.mem_mb) || _isMissingNum(e.uptime_s)))) {
+        const es = await _fetchExecutorState();
+        e = {
+          ...e,
+          pid: e.pid ?? es.pid,
+          cpu_s: !_isMissingNum(e.cpu_s) ? e.cpu_s : es.cpu_s,
+          mem_mb: !_isMissingNum(e.mem_mb) ? e.mem_mb : es.mem_mb,
+          uptime_s: !_isMissingNum(e.uptime_s) ? e.uptime_s : es.uptime_s,
+          log_age_min: e.log_age_min ?? es.age_min,
+          log_file: e.log_file ?? es.log_file,
+          fresh: (typeof e.fresh === 'boolean') ? e.fresh : es.fresh
+        };
+      }
+
       kv($exec, [
         ['PID', e.pid ?? '—'],
         ['CPU (s)', fmt1(e.cpu_s)],
@@ -138,6 +153,7 @@ function fmtNum(x) {
         ['Log file', basename(e.log_file)],
         ['Uptime', fmtUptimeSec(e.uptime_s)],
       ]);
+
       const eState = (e.fresh === false) ? 'bad' : (e.pid ? 'ok' : 'off');
       setLight(document.getElementById('light-exec'), eState, 'Executor');
       const eMeta = document.getElementById('meta-exec');
@@ -147,7 +163,23 @@ function fmtNum(x) {
       );
 
       // ---------- RETRAIN (scheduler) ----------
-      const r = s?.retrain || {};
+      let r = s?.retrain || {};
+      // fallback: se estiverem a faltar métricas, tenta /scheduler_state
+      if (!r || (!r.pid && (_isMissingNum(r.cpu_s) || _isMissingNum(r.mem_mb) || _isMissingNum(r.uptime_s)))) {
+        const rs = await _fetchSchedulerState();
+        r = {
+          ...r,
+          pid: r.pid ?? rs.pid,
+          cpu_s: !_isMissingNum(r.cpu_s) ? r.cpu_s : rs.cpu_s,
+          mem_mb: !_isMissingNum(r.mem_mb) ? r.mem_mb : rs.mem_mb,
+          uptime_s: !_isMissingNum(r.uptime_s) ? r.uptime_s : rs.uptime_s,
+          log_age_min: r.log_age_min ?? rs.age_min,
+          log_file: r.log_file ?? rs.log_file,
+          fresh: (typeof r.fresh === 'boolean') ? r.fresh : rs.fresh,
+          locks: Array.isArray(r.locks) ? r.locks : (Array.isArray(rs.locks) ? rs.locks : [])
+        };
+      }
+
       kv($retr, [
         ['PID', r.pid ?? '—'],
         ['CPU (s)', fmt1(r.cpu_s)],
@@ -157,6 +189,7 @@ function fmtNum(x) {
         ['Uptime', fmtUptimeSec(r.uptime_s)],
         ['Locks', (Array.isArray(r.locks) && r.locks.length) ? r.locks.join(', ') : 'none'],
       ]);
+
       const rState = (r.fresh === false) ? 'warn' : (r.pid ? 'ok' : 'off');
       setLight(document.getElementById('light-retrain'), rState, 'Retrain');
       const rMeta = document.getElementById('meta-retrain');
@@ -167,6 +200,16 @@ function fmtNum(x) {
 
       // ---------- WATCHER ----------
       const w = s?.watcher || {};
+      if ($watch){
+        kv($watch, [
+          ['PID', w.pid ?? '—'],
+          ['CPU (s)', fmt1(w.cpu_s)],
+          ['Mem (MB)', w.mem_mb != null ? Math.round(w.mem_mb) : '—'],
+          ['Log age (min)', w.log_age_min != null ? w.log_age_min : '—'],
+          ['Log file', basename(w.log_file)],
+          ['Uptime', fmtUptimeSec(w.uptime_s)],
+        ]);
+      }
       const wState = w.pid ? 'ok' : ((w.fresh === false) ? 'warn' : 'off');
       setLight(document.getElementById('light-watcher'), wState, 'Watcher');
       const wMeta = document.getElementById('meta-watcher');
@@ -175,7 +218,7 @@ function fmtNum(x) {
         w.uptime_s != null ? Math.round(w.uptime_s) : null
       );
 
-      // ---------- EMITTER (NOVO) ----------
+      // ---------- EMITTER ----------
       const m = s?.emitter || {};
       if ($emit){
         kv($emit, [
@@ -195,6 +238,60 @@ function fmtNum(x) {
         m.uptime_s != null ? Math.round(m.uptime_s) : null
       );
 
+      // ---------- GOVERNOR (opcional) ----------
+      const g = s?.governor || {};
+      const gs = g.state || {};
+      const g_pid = g.pid ?? gs.pid;
+      const g_mem = g.mem_mb ?? gs.mem_mb;
+      const g_upt = g.uptime_s ?? gs.uptime_s;
+      const g_ok = !!g_pid || !!gs.pid;
+
+      if ($gov) {
+        kv($gov, [
+          ['PID', g_pid ?? '—'],
+          ['CPU (s)', fmt1(g.cpu_s ?? gs.cpu_s)],
+          ['Mem (MB)', g_mem != null ? Math.round(g_mem) : '—'],
+          ['Uptime', fmtUptimeSec(g_upt)],
+          ['Fresh', String(g.fresh ?? gs.fresh ?? '—')],
+          ['Log age (min)', g.log_age_min ?? '—'],
+          ['Log file', basename(g.log_file)],
+        ]);
+      }
+      setLight(document.getElementById('light-governor'), g_ok ? 'ok' : 'off', 'Governor');
+      const gMeta = document.getElementById('meta-governor');
+      if (gMeta) gMeta.textContent = fmtMeta(
+        g_mem != null ? Math.round(g_mem) : null,
+        g_upt != null ? Math.round(g_upt) : null
+      );
+
+      // ---------- PROMOTER (opcional) ----------
+      const p = s?.promoter || {};
+      const ps = p.state || {};
+      const p_pid = p.pid ?? ps.pid;
+      const p_mem = p.mem_mb ?? ps.mem_mb;
+      const p_upt = p.uptime_s ?? ps.uptime_s;
+      const p_ok = !!p_pid || !!ps.pid;
+
+      if ($prom) {
+        kv($prom, [
+          ['PID', p_pid ?? '—'],
+          ['CPU (s)', fmt1(p.cpu_s ?? ps.cpu_s)],
+          ['Mem (MB)', p_mem != null ? Math.round(p_mem) : '—'],
+          ['Uptime', fmtUptimeSec(p_upt)],
+          ['Fresh', String(p.fresh ?? ps.fresh ?? '—')],
+          ['Log age (min)', p.log_age_min ?? '—'],
+          ['Log file', basename(p.log_file)],
+          ['Scan every (min)', p.scan_every_min ?? ps.scan_every_min ?? '—'],
+          ['Require MODEL_OK', String(p.require_model_ok ?? ps.require_model_ok ?? '—')],
+        ]);
+      }
+      setLight(document.getElementById('light-promoter'), p_ok ? 'ok' : 'off', 'Promoter');
+      const pMeta = document.getElementById('meta-promoter');
+      if (pMeta) pMeta.textContent = fmtMeta(
+        p_mem != null ? Math.round(p_mem) : null,
+        p_upt != null ? Math.round(p_upt) : null
+      );
+
       // ---------- TOP BANNER ----------
       const banner = document.getElementById("globalStatus");
       if (banner){
@@ -202,6 +299,7 @@ function fmtNum(x) {
         if (!bOk)                   { state='bad';  msg='❌ Bridge inativo'; }
         else if (e.fresh === false) { state='bad';  msg='⚠️ Executor sem atividade recente'; }
         else if (m.fresh === false) { state='warn'; msg='ℹ️ Emitter inativo / em espera'; }
+        else if (w.fresh === false) { state='warn'; msg='ℹ️ Watcher inativo / em espera'; }
         else if (r.fresh === false) { state='warn'; msg='ℹ️ Retrain parado / em espera'; }
 
         banner.className = `status-banner ${state}`;
@@ -226,12 +324,18 @@ function fmtNum(x) {
       kv($bridge, [['Status','OFF','bad']]);
       kv($exec,   [['PID','—'],['CPU (s)','—'],['Mem (MB)','—'],['Log age (min)','—'],['Uptime','—']]);
       kv($retr,   [['PID','—'],['CPU (s)','—'],['Mem (MB)','—'],['Log age (min)','—'],['Uptime','—'],['Locks','—']]);
-      if ($emit){ kv($emit,[['PID','—'],['CPU (s)','—'],['Mem (MB)','—'],['Log age (min)','—'],['Uptime','—']]); }
+      if ($watch){ kv($watch,[['PID','—'],['CPU (s)','—'],['Mem (MB)','—'],['Log age (min)','—'],['Uptime','—']]); }
+      if ($emit){  kv($emit, [['PID','—'],['CPU (s)','—'],['Mem (MB)','—'],['Log age (min)','—'],['Uptime','—']]); }
+      if ($gov){   kv($gov,  [['PID','—'],['Uptime','—']]); }
+      if ($prom){  kv($prom, [['PID','—'],['Uptime','—']]); }
+
       setLight(document.getElementById('light-bridge'),'off');
       setLight(document.getElementById('light-exec'),'off');
       setLight(document.getElementById('light-retrain'),'off');
       setLight(document.getElementById('light-watcher'),'off');
       setLight(document.getElementById('light-emitter'),'off');
+      setLight(document.getElementById('light-governor'),'off');
+      setLight(document.getElementById('light-promoter'),'off');
       ['meta-bridge','meta-exec','meta-retrain','meta-watcher','meta-emitter'].forEach(id=>{
         const el=document.getElementById(id); if(el) el.textContent='';
       });
@@ -240,7 +344,7 @@ function fmtNum(x) {
 
   // --------------------------------------------------
   // Load Strategies Table
-  // --------------------------------------------------
+  // -------------------------------------------------
   async function loadStrategies(){
     try{
       const data = await api('/strategies');
@@ -261,10 +365,10 @@ function fmtNum(x) {
             <td>${r.symbol||'-'}</td>
             <td><span class="tag">${r.timeframe||'-'}</span></td>
             <td><a class="tag" href="${r.source_url||'#'}">${fonte}</a></td>
-            <td>${fmtNum(r.window_min)}</td>
-            <td>${fmtNum(r.last_run_min)}</td>
+            <td>${fmtNumSafe(r.window_min)}</td>
+            <td>${fmtNumSafe(r.last_run_min)}</td>
             <td>${r.due?'<span class="ok">Sim</span>':'<span class="muted">Não</span>'}</td>
-            <td>${fmtNum(r.next_in_min)}</td>
+            <td>${fmtNumSafe(r.next_in_min)}</td>
             <td class="mono">${r.config_file||'-'}</td>
             <td class="actions">
               <button class="btn-small" data-cfg="${r.config_file||''}" data-symbol="${r.symbol||''}">Run</button>
@@ -313,6 +417,36 @@ function fmtNum(x) {
     if ($yaml) $yaml.style.display='none';
   }
 
+  async function loadPortfolioBox(){
+  const box = document.getElementById('portfolioBox');
+  if (!box) return;
+  try {
+    const data = await api('/portfolio');
+    const items = Array.isArray(data?.items) ? data.items : (data?.selection?.items || []);
+    if (!items || !items.length){
+      box.innerHTML = '<div class="muted">Sem seleção no momento.</div>';
+      return;
+    }
+    // tabela compacta
+    let html = '<table><thead><tr><th>#</th><th>Symbol</th><th>TF</th><th>PF</th><th>Trades</th><th>Sharpe</th><th>maxDD</th></tr></thead><tbody>';
+    items.forEach((it, i)=>{
+      html += `<tr>
+        <td>${i+1}</td>
+        <td>${it.symbol||'-'}</td>
+        <td><span class="tag">${it.timeframe||'-'}</span></td>
+        <td>${fmtNum(it.pf)}</td>
+        <td>${fmtNum(it.trades)}</td>
+        <td>${fmtNum(it.sharpe)}</td>
+        <td>${fmtNum(it.max_dd)}</td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+    box.innerHTML = html;
+  } catch(e){
+    box.innerHTML = '<div class="muted">Erro a ler portfolio: '+e+'</div>';
+  }
+}
+
   // --------------------------------------------------
   // Refresh logic + spinner visual
   // --------------------------------------------------
@@ -336,7 +470,7 @@ function fmtNum(x) {
         $refreshBtn.disabled = true;
         spinner.style.display = 'inline-block';
       }
-      await Promise.all([loadHealth(), loadStrategies()]);
+      await Promise.all([loadHealth(), loadStrategies(), loadPortfolioBox()]);
     } finally {
       if ($refreshBtn) {
         $refreshBtn.disabled = false;
@@ -385,7 +519,7 @@ function fmtNum(x) {
   });
 
   async function proc(action){
-    const tgt = document.getElementById('procTarget').value; // garante que o <select> inclui "emitter"
+    const tgt = document.getElementById('procTarget').value;
     try{
       const j = await api('/proc_run', {
         method:'POST',
@@ -406,7 +540,7 @@ function fmtNum(x) {
   await refreshAll();
   startAutoRefresh(true);
 
-  // ====== LOG VIEWER (com emitter) =========
+  // ====== LOG VIEWER (inclui watcher/emitter; extensível para gov/prom) ======
   (function(){
     const logsCard = document.querySelector('#strategies')?.closest('.card')?.nextElementSibling;
     const logArea = document.getElementById('out');
@@ -443,16 +577,17 @@ function fmtNum(x) {
           o.textContent = f.name;
           sel.appendChild(o);
         });
-        // fallback default if vazio
         if (!sel.value){
-          ['executor.log','scheduler_retrain.log','retrain.log','risk_manager.log','watch_signals.log','emitter.log'].forEach(n=>{
-            const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
-          });
+          ['executor.log','scheduler_retrain.log','retrain.log','watch_signals.log','emitter.log','governor.log','promoter.log']
+            .forEach(n=>{
+              const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
+            });
         }
       }catch(e){
-        ['executor.log','scheduler_retrain.log','retrain.log','risk_manager.log','watch_signals.log','emitter.log'].forEach(n=>{
-          const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
-        });
+        ['executor.log','scheduler_retrain.log','retrain.log','watch_signals.log','emitter.log','governor.log','promoter.log']
+          .forEach(n=>{
+            const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
+          });
       }
     }
 

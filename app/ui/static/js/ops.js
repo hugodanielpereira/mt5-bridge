@@ -1,3 +1,4 @@
+//#bridges\mt5-bridge\app\ui\static\js\ops.js
 async function opsRun(action){
   const tgt = document.getElementById('opsTarget').value;
   const out = document.getElementById('opsOut');

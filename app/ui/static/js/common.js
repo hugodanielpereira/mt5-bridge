@@ -1,3 +1,4 @@
+//bridges\mt5-bridge\app\ui\static\js\common.js
 // -----------------------------------------------------------
 // Helpers globais + API base configurável
 // -----------------------------------------------------------

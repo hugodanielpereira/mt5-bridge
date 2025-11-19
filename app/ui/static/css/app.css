@@ -174,3 +174,46 @@ tbody tr{border-bottom:1px solid var(--border);}
   background-color: rgba(128, 128, 128, 0.1);
   color: var(--mut);
 }
+
+/* ---------- Portfolio Top-K ---------- */
+#portfolioBox {
+  font-size: 13px;
+  overflow-x: auto;
+  max-height: 360px;
+}
+
+#portfolioBox table {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+#portfolioBox thead {
+  background: var(--panel-2);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+#portfolioBox th, 
+#portfolioBox td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+#portfolioBox tbody tr:nth-child(even) {
+  background: var(--hl);
+}
+
+#portfolioBox tbody tr:hover {
+  background: var(--btn-bg-hover);
+}
+
+#portfolioBox .tag {
+  font-size: 11px;
+  padding: 1px 5px;
+}

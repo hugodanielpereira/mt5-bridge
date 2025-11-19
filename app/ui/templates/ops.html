@@ -30,7 +30,14 @@
   <div id="tab-ops" class="tab active">
     <div class="row">
       <select id="opsTarget">
-        <option>all</option><option>bridge</option><option>executor</option><option>retrain</option>
+        <option>all</option>
+        <option>bridge</option>
+        <option>executor</option>
+        <option>retrain</option>
+        <option>watcher</option>
+        <option>emitter</option>
+        <option>governor</option>   <!-- NOVO -->
+        <option>promoter</option>   <!-- NOVO -->
       </select>
       <button onclick="opsRun('up')">Up</button>
       <button onclick="opsRun('down')">Down</button>

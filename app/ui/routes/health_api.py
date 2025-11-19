@@ -17,6 +17,8 @@ PIDS = BASE / "outputs" / "live" / "pids"
 SIGNALS_DIR = Path(os.getenv("SIGNALS_DIR", str(BASE / "outputs" / "live" / "signals")))
 BRIDGE_HOST = os.getenv("BRIDGE_HOST", "127.0.0.1")
 BRIDGE_PORT = int(os.getenv("BRIDGE_PORT", "5005"))
+_PAT_GOV   = ["tools.asset_governor", "asset_governor.py"]
+_PAT_PRO   = ["tools.promote_model", "promote_model.py"]
 
 # ---------- helpers ----------
 def _age_min(p: Path) -> Optional[float]:
@@ -139,9 +141,17 @@ def _service_status() -> Dict[str, Any]:
     retr_procs = _proc_info(_PAT_RETR)
     retrain = _first_or_none(retr_procs) or {}
 
-    # Watcher (opcional)
+    # Watcher  (signals)
     watch_procs = _proc_info(_PAT_WATCH)
     watcher = _first_or_none(watch_procs) or {}
+
+    # Governor
+    gov_procs = _proc_info(_PAT_GOV)
+    governor = _first_or_none(gov_procs) or {}
+
+    # Promoter
+    pro_procs = _proc_info(_PAT_PRO)
+    promoter = _first_or_none(pro_procs) or {}
 
     # Logs & sinais
     exec_log = LOGS / "executor.log"
@@ -193,6 +203,14 @@ def _service_status() -> Dict[str, Any]:
             "done": cnt_done,
             "latest_file": latest_name,
             "latest_ts": int(latest_ts) if latest_ts else None,
+        },
+        "governor": {
+            "pid": governor.get("pid"), "cpu_s": governor.get("cpu_s"),
+            "mem_mb": governor.get("mem_mb"), "uptime_s": governor.get("uptime_s"),
+        },
+        "promoter": {
+            "pid": promoter.get("pid"), "cpu_s": promoter.get("cpu_s"),
+            "mem_mb": promoter.get("mem_mb"), "uptime_s": promoter.get("uptime_s"),
         },
         "logs": {
             "executor": str(exec_log),

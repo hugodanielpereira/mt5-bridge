@@ -2,8 +2,8 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
 import os
-import pandas as pd
 import json
+import pandas as pd
 
 try:
     import MetaTrader5 as MT5
@@ -15,31 +15,40 @@ from .utils import TF_MAP, nt_to_dict
 
 
 def _load_symbols_map() -> Dict[str, str]:
-    """Lê SYMBOLS_MAP (yaml ou json), devolve dict {UPPER: target}."""
-    p = os.getenv("SYMBOLS_MAP", "").strip()
-    if not p:
+    """
+    Lê SYMBOLS_MAP (yaml ou json), devolve dict {CHAVE_EM_UPPER: valor_preservado}.
+    Não altera o case dos valores, porque no MT5 o case é sensível.
+    """
+    path = os.getenv("SYMBOLS_MAP", "").strip()
+    if not path:
         return {}
     try:
-        if p.lower().endswith((".yaml", ".yml")):
-            import yaml  # type: ignore
-            d = yaml.safe_load(open(p, "r", encoding="utf-8")) or {}
+        data: Dict[str, Any]
+        if path.lower().endswith((".yaml", ".yml")):
+            try:
+                import yaml  # type: ignore
+            except Exception:
+                return {}
+            data = yaml.safe_load(open(path, "r", encoding="utf-8")) or {}
         else:
-            d = json.load(open(p, "r", encoding="utf-8"))
-        out = {}
-        for k, v in (d or {}).items():
-            if not k: 
+            data = json.load(open(path, "r", encoding="utf-8"))
+        out: Dict[str, str] = {}
+        for k, v in (data or {}).items():
+            if not k:
                 continue
-            out[str(k).upper()] = str(v)
+            out[str(k).upper()] = str(v).strip()  # preserva case do valor
         return out
     except Exception:
         return {}
 
+
 def _try_variants_in_terminal(base: str) -> Optional[str]:
     """
     Procura variantes no terminal MT5:
-      - base
-      - base + sufixos MT5_SYMBOL_SUFFIXES (ex.: '.r,.i')
-      - nomes que contenham base como substring (visíveis)
+      - match exato
+      - match com sufixos (env MT5_SYMBOL_SUFFIXES='.r,.i,....')
+      - substring 'contains' (ex.: 'BTCUSD.r', '_BTCUSD')
+    Devolve o nome exatamente como existente no terminal (case correto) ou None.
     """
     infos = MT5.symbols_get() or []
     names = [nt_to_dict(x).get("name", "") for x in infos]
@@ -59,7 +68,7 @@ def _try_variants_in_terminal(base: str) -> Optional[str]:
             if n.upper() == cand.upper():
                 return n
 
-    # 3) substring “contains” (ex.: ‘BTCUSD.r’, ‘_BTCUSD’ …)
+    # 3) substring “contains”
     up = base.upper()
     for n in names:
         if up in n.upper():
@@ -69,51 +78,59 @@ def _try_variants_in_terminal(base: str) -> Optional[str]:
 
 
 class MarketData:
+    """
+    Serviço de dados de mercado via MT5.
+    Resolve símbolos de forma robusta e devolve OHLCV com timestamps em UTC.
+    """
+
     def __init__(self, session: MT5Session) -> None:
         self.s = session
-        self._symmap = _load_symbols_map()
+        self._symmap = _load_symbols_map()  # {UPPER: ValorPreservado}
 
     def _resolve_symbol_robust(self, requested: str) -> str:
         """
         Resolve símbolo pedido para o símbolo MT5:
           1) session.resolve_symbol()
           2) SYMBOLS_MAP (env)
-          3) heurística USDT->USD
+          3) heurística USDT→USD
           4) variantes/sufixos existentes no terminal
         """
-        req_up = (requested or "").strip().upper()
-        if not req_up:
+        req = (requested or "").strip()
+        if not req:
             raise RuntimeError("símbolo vazio")
 
-        # 1) implementação existente (respeita overrides no Session)
+        # 1) implementação da sessão (já usa mapa + terminal)
         try:
-            mt5_sym = self.s.resolve_symbol(req_up)
-            if mt5_sym:
+            mt5_sym = self.s.resolve_symbol(req)
+            if mt5_sym and MT5.symbol_info(mt5_sym) is not None:
                 return mt5_sym
         except Exception:
             pass
 
         # 2) SYMBOLS_MAP (env)
-        if req_up in self._symmap:
-            mapped = self._symmap[req_up]
-            # ainda confirmar que existe no terminal (tentamos variantes também)
-            found = _try_variants_in_terminal(mapped) or mapped
-            return found
+        alias = self._symmap.get(req.upper())
+        if alias:
+            found = _try_variants_in_terminal(alias) or alias
+            if MT5.symbol_info(found) is not None:
+                return found
 
         # 3) Heurística USDT -> USD
-        if req_up.endswith("USDT"):
-            base_usd = req_up[:-4] + "USD"  # troca USDT → USD
-            found = _try_variants_in_terminal(base_usd)
-            if found:
+        if req.upper().endswith("USDT"):
+            base_usd = req[:-4] + "USD"
+            found = _try_variants_in_terminal(base_usd) or base_usd
+            if MT5.symbol_info(found) is not None:
                 return found
 
         # 4) tentativa direta e variantes no terminal
-        found = _try_variants_in_terminal(req_up)
-        if found:
+        found = _try_variants_in_terminal(req)
+        if found and MT5.symbol_info(found) is not None:
             return found
 
-        # Se chegou aqui, não encontramos
-        raise RuntimeError(f"symbol '{requested}' not found (tenta mapear em SYMBOLS_MAP ou definir MT5_SYMBOL_SUFFIXES)")
+        # Falhou
+        raise RuntimeError(
+            f"symbol '{requested}' not found (configure alias em SYMBOLS_MAP "
+            f"ou defina sufixos em MT5_SYMBOL_SUFFIXES)"
+        )
 
     def account_info(self) -> Dict[str, Any]:
         self.s.ensure_up()
@@ -156,14 +173,20 @@ class MarketData:
             })
         return out
 
-    def ohlcv(self, symbol: str, tf: str = "H1",
-              start: Optional[str] = None, end: Optional[str] = None, limit: int = 1000) -> List[Dict[str, Any]]:
+    def ohlcv(
+        self,
+        symbol: str,
+        tf: str = "H1",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        limit: int = 1000
+    ) -> List[Dict[str, Any]]:
         self.s.ensure_up()
         tf = (tf or "H1").upper()
         if tf not in TF_MAP:
             raise RuntimeError(f"invalid tf '{tf}' (use one of {list(TF_MAP)})")
 
-        # <<< RESOLVE AQUI >>>  (agora robusto)
+        # Resolve símbolo (robusto) e garante visibilidade
         symbol_mt5 = self._resolve_symbol_robust(symbol)
         self.s.ensure_symbol(symbol_mt5)
 
@@ -179,6 +202,7 @@ class MarketData:
 
         if rates is None or len(rates) == 0:
             return []
+
         df = pd.DataFrame(rates)
         if "time" in df.columns:
             df["timestamp"] = pd.to_datetime(df["time"], unit="s", utc=True)
@@ -186,11 +210,17 @@ class MarketData:
             df.rename(columns={"tick_volume": "volume"}, inplace=True)
 
         cols = [c for c in ["timestamp", "open", "high", "low", "close", "volume"] if c in df.columns]
-        df = df[cols].drop_duplicates("timestamp").sort_values("timestamp").reset_index(drop=True)
-        df = df.assign(symbol=symbol, timeframe=tf)  # devolve símbolo pedido
+        df = (
+            df[cols]
+            .drop_duplicates("timestamp")
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
+        # devolve o símbolo pedido (não o interno do broker) para consistência com restante stack
+        df = df.assign(symbol=symbol, timeframe=tf)
         return df.to_dict(orient="records")
 
-    def symbol_info(self, symbol: str):
+    def symbol_info(self, symbol: str) -> Dict[str, Any]:
         self.s.ensure_up()
         symbol_mt5 = self._resolve_symbol_robust(symbol)
         self.s.ensure_symbol(symbol_mt5)
@@ -224,7 +254,7 @@ class MarketData:
             "requested_symbol": symbol,
         }
 
-    def quote(self, symbol: str):
+    def quote(self, symbol: str) -> Dict[str, Any]:
         self.s.ensure_up()
         symbol_mt5 = self._resolve_symbol_robust(symbol)
         self.s.ensure_symbol(symbol_mt5)

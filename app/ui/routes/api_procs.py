@@ -72,19 +72,19 @@ def _cmd_for(target: str, action: str, *, visible: bool) -> tuple[list[str] | st
     tgt = (target or "").strip().lower()
     act = (action or "").strip().lower()
 
-    valid = {"all","bridge","executor","retrain","scheduler","watcher","emitter"}
+    # ⬇️ acrescenta governor e promoter
+    valid = {"all","bridge","executor","retrain","scheduler","watcher","emitter","governor","promoter"}
     if tgt not in valid:
         raise HTTPException(status_code=400, detail=f"target inválido: {target}")
     if act not in ("start", "stop", "restart"):
         raise HTTPException(status_code=400, detail=f"action inválida: {action}")
 
-    # scheduler == retrain nos scripts MLSL
     if tgt == "scheduler":
         tgt = "retrain"
 
     mlsl = _mlsl_ps1()
     allow_missing = bool(os.getenv("PYTEST_CURRENT_TEST")) or (
-        os.getenv("MLSL_ALLOW_MISSING_MLSL", "0").lower() in ("1", "true", "yes", "on")
+        os.getenv("MLSL_ALLOW_MISSING_MLSL", "0").lower() in ("1","true","yes","on")
     )
     if not mlsl.exists() and not allow_missing:
         raise HTTPException(
@@ -92,7 +92,7 @@ def _cmd_for(target: str, action: str, *, visible: bool) -> tuple[list[str] | st
             detail=f"mlsl.ps1 não encontrado em {mlsl}. Define PROJECT_DIR (ou MLSL_APPS_DIR) no .env."
         )
 
-    verb = {"start": "up", "stop": "down", "restart": "restart"}[act]
+    verb = {"start":"up","stop":"down","restart":"restart"}[act]
 
     env = os.environ.copy()
     if visible:
@@ -100,7 +100,7 @@ def _cmd_for(target: str, action: str, *, visible: bool) -> tuple[list[str] | st
 
     if _is_windows():
         ps = _pwsh_exe()
-        cmd = [ps, "-ExecutionPolicy", "Bypass", "-File", str(mlsl), verb, tgt]
+        cmd = [ps, "-ExecutionPolicy", "Bypass", "-File", str(mlsl), verb, tgt]  # ⬅️ tgt já inclui governor/promoter
         return cmd, mlsl.parent, env
     else:
         return (["bash", str(mlsl), verb, tgt], mlsl.parent, env)

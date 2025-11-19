@@ -101,6 +101,34 @@ def _run(cmd: list[str] | str, cwd: Optional[Path] = None, env: Optional[Dict[st
         return {"rc": p.returncode, "stdout": p.stdout or "", "stderr": p.stderr or ""}
     except Exception as e:
         return {"rc": -1, "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
+    
+def _portfolio_file() -> Path:
+    env = os.getenv("PORTFOLIO_FILE")
+    if env:
+        return Path(env)
+    return _apps_root() / "outputs" / "live" / "portfolio" / "top10.yaml"
+
+def _retrain_yaml_file() -> Path:
+    return _schedule_file()
+
+def _read_yaml_safe(p: Path) -> dict:
+    try:
+        import yaml  # type: ignore
+        return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+# --- State files (governor/promoter) ---
+def _state_dir() -> Path:
+    return _apps_root() / "outputs" / "live" / "state"
+
+def _read_json_safe(p: Path) -> dict:
+    try:
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        pass
+    return {}
 
 # ================== Helpers de processos (psutil) ==================
 def _ps():
@@ -404,6 +432,21 @@ def _log_age_min_multi(base: Path, names: list[str]) -> tuple[Optional[float], O
             return age, str(p)
     return None, None
 
+STATE_DIR = _apps_root() / "outputs" / "live" / "state"
+
+def _read_state_json(name: str) -> dict:
+    """Lê um ficheiro de estado JSON do outputs/live/state (ex: promoter-state.json)."""
+    try:
+        p = STATE_DIR / name
+        if not p.exists():
+            return {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
 @router.get("/status")
 def status():
     # ---------- BRIDGE ----------
@@ -475,6 +518,34 @@ def status():
     )
     emitter_fresh = bool(emet.get("pid")) or (emitter_age is not None and emitter_age <= int(os.getenv("EMITTER_FRESH_MAX_AGE_MIN","5")))
 
+    # --- GOVERNOR ---
+    gov_pid = _read_pid("mlsl-governor.pid")
+    gov_needles = ["tools.asset_governor", "asset_governor.py", "governor loop"]
+    pg = _locate_proc(gov_pid, gov_needles) or _find_proc(gov_needles)
+    gov_info = _pmet(pg)
+    gov_age, gov_file = _log_age_min_multi(_logs_dir(), ["governor.log","asset_governor.log","governor.stdout.log","governor.stderr.log"])
+    gov_fresh = bool(gov_info.get("pid")) or (gov_age is not None and gov_age <= int(os.getenv("GOV_FRESH_MAX_AGE_MIN","15")))
+
+    # ler governor-state.json (min_pf/top_k/itens)
+    gov_state = _read_json_safe(_state_dir() / "governor-state.json")
+    gov_items = gov_state.get("items") or []
+    gov_selected = len(gov_items)
+    gov_topk = gov_state.get("top_k") or gov_state.get("selection",{}).get("top_k")
+    gov_min_pf = (gov_state.get("selection") or {}).get("min_pf")
+
+    # --- PROMOTER ---
+    pro_pid = _read_pid("mlsl-promoter.pid")
+    pro_needles = ["tools.promote_model","promote_model.py","promoter loop"]
+    pp = _locate_proc(pro_pid, pro_needles) or _find_proc(pro_needles)
+    pro_info = _pmet(pp)
+    pro_age, pro_file = _log_age_min_multi(_logs_dir(), ["promoter.log","promote.log","promoter.stdout.log","promoter.stderr.log"])
+    pro_fresh = bool(pro_info.get("pid")) or (pro_age is not None and pro_age <= int(os.getenv("PROMO_FRESH_MAX_AGE_MIN","30")))
+
+    # ler promoter-state.json (scan_every_min/require_model_ok)
+    pro_state = _read_json_safe(_state_dir() / "promoter-state.json")
+    scan_every_min = pro_state.get("scan_every_min")
+    require_model_ok = pro_state.get("require_model_ok")
+
     return {
         "bridge": {
             "ok": bridge_ok,
@@ -520,6 +591,31 @@ def status():
             "log_age_min": emitter_age,
             "fresh": emitter_fresh,
             "log_file": emitter_file,
+        },
+        "governor": {
+            "pid": gov_info.get("pid"),
+            "cpu_s": gov_info.get("cpu_s"),
+            "mem_mb": gov_info.get("mem_mb"),
+            "uptime_s": gov_info.get("uptime_s"),
+            "log_age_min": gov_age,
+            "fresh": gov_fresh,
+            "log_file": gov_file,
+            # novos:
+            "selected_assets": gov_items,
+            "top_k": gov_topk,
+            "min_pf": gov_min_pf,
+        },
+        "promoter": {
+            "pid": pro_info.get("pid"),
+            "cpu_s": pro_info.get("cpu_s"),
+            "mem_mb": pro_info.get("mem_mb"),
+            "uptime_s": pro_info.get("uptime_s"),
+            "log_age_min": pro_age,
+            "fresh": pro_fresh,
+            "log_file": pro_file,
+            # novos:
+            "scan_every_min": scan_every_min,
+            "require_model_ok": require_model_ok,
         },
     }
 
@@ -731,6 +827,46 @@ def emitter_state():
         "uptime_s": met.get("uptime_s"),
     }
 
+@router.get("/portfolio")
+def get_portfolio():
+    """JSON para a aba Portfolio na UI."""
+    p = _portfolio_file()
+    return _read_yaml_safe(p) if p.exists() else {"version": 1, "top": []}
+
+@router.get("/governor_status")
+def governor_status():
+    """Resumo de jobs enabled/disabled a partir do retrain.yaml."""
+    doc = _read_yaml_safe(_retrain_yaml_file())
+    jobs = doc.get("jobs") or []
+    enabled = sum(1 for j in jobs if j.get("enabled"))
+    disabled = sum(1 for j in jobs if not j.get("enabled"))
+    return {"enabled": enabled, "disabled": disabled, "total": len(jobs), "ts": time.time()}
+
+@router.post("/jobs/{job_id}/toggle")
+def toggle_job(job_id: str, payload: Dict[str, Any]):
+    """Enable/disable manual de um job no retrain.yaml."""
+    p = _retrain_yaml_file()
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="retrain.yaml não encontrado")
+    import yaml  # type: ignore
+    doc = _read_yaml_safe(p)
+    jobs = doc.get("jobs") or []
+    found = False
+    en = bool(payload.get("enabled", True))
+    reason = (payload.get("reason") or "manual toggle").strip()
+    for j in jobs:
+        if str(j.get("id")) == job_id:
+            j["enabled"] = en
+            if not en:
+                j["disabled_reason"] = reason
+                j["disabled_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            found = True
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail="job não encontrado")
+    p.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    return {"ok": True}
+
 # === Logs & Failed Signals =========================================
 LOG_DIR    = _apps_root() / "outputs" / "live" / "logs"
 FAILED_DIR = _apps_root() / "outputs" / "live" / "signals" / "failed"
@@ -875,12 +1011,6 @@ def view_schedule():
     return PlainTextResponse(p.read_text(encoding="utf-8"))
 
 # --- NOVO: abrir um config YAML arbitrário (usado pelo link "Ver cfg" na tabela)
-def _configs_dir() -> Path:
-    env = os.getenv("CONFIGS_DIR")
-    if env:
-        return Path(env)
-    return _apps_root() / "outputs" / "live" / "configs"
-
 @router.get("/view_config")
 def view_config(file: str):
     base = _configs_dir()

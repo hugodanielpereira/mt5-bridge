@@ -11,7 +11,8 @@ from dotenv import load_dotenv
 
 from .session import MT5Session
 from .marketdata import MarketData
-from .trade import Trade
+from .trade import Trade          # mantém para compatibilidade com código antigo
+from .orders import Orders        # <- NOVO: usa esta para as ordens via API
 from .history import History
 from .diag import diag as _diag  # função existente
 
@@ -135,7 +136,8 @@ class MT5Service:
 
         # módulos da façade
         self.market = MarketData(self.session)
-        self.trade = Trade(self.session)
+        self.trade = Trade(self.session)      # <- legado (caso algum código ainda use)
+        self.orders = Orders(self.session)    # <- NOVO: API consolidada para ordens
         self.history = History(self.session)
         self.connected: bool = False
 
@@ -182,15 +184,34 @@ class MT5Service:
     def ohlcv(self, *args, **kwargs) -> List[Dict[str, Any]]:
         return self.market.ohlcv(*args, **kwargs)
 
+    # ==== ORDERS / TRADE (via Orders) =======================================
     def order_market(self, *args, **kwargs) -> Dict[str, Any]:
-        return self.trade.order_market(*args, **kwargs)
+        """
+        Envia ordem de mercado robusta (via Orders.order_market).
+        """
+        return self.orders.order_market(*args, **kwargs)
+
+    def modify_position(self, ticket: int, sl: float | None = None, tp: float | None = None) -> Dict[str, Any]:
+        """
+        Atualiza SL/TP de uma posição existente (via Orders.modify_position).
+        """
+        return self.orders.modify_position(ticket=ticket, sl=sl, tp=tp)
 
     def close_symbol(self, symbol: str):
-        return self.trade.close_symbol(symbol)
+        """
+        Fecha todas as posições de um símbolo (via Orders.close_symbol).
+        """
+        return self.orders.close_symbol(symbol)
 
-    def close_ticket(self, ticket: int):
-        return self.trade.close_ticket(ticket)
+    def close_ticket(self, ticket: int, volume: float | None = None):
+        """Fecho total ou parcial de uma posição."""
+        return self.trade.close_ticket(ticket, volume)
 
+    def modify_position(self, ticket: int, sl: float | None = None, tp: float | None = None):
+        """Atualiza SL/TP de uma posição existente."""
+        return self.trade.modify_position(ticket, sl=sl, tp=tp)
+
+    # ==== HISTORY / DIAG =====================================================
     def diag(self) -> Dict[str, Any]:
         return _diag(self.session)
 

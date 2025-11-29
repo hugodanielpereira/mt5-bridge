@@ -1,3 +1,4 @@
+# app/services/mt5/orders.py
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 from fastapi import HTTPException
@@ -181,4 +182,53 @@ class Orders:
         d = nt_to_dict(r) if r else None
         if not r or d.get("retcode") != MT5.TRADE_RETCODE_DONE:
             raise RuntimeError(f"close failed: {d}")
+        return d
+
+    def modify_position(
+        self,
+        ticket: int,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Atualiza SL/TP de uma posição existente (por ticket).
+        Se sl ou tp vierem como None, mantém o valor atual.
+
+        Usa TRADE_ACTION_SLTP do MT5.
+        """
+        self.s.ensure_up()
+
+        # pelo menos um dos dois tem de ser fornecido ou existir na posição
+        if sl is None and tp is None:
+            raise HTTPException(status_code=400, detail="sl or tp required")
+
+        p = next(
+            (pp for pp in (MT5.positions_get() or []) if getattr(pp, "ticket", None) == ticket),
+            None,
+        )
+        if not p:
+            raise HTTPException(status_code=404, detail=f"position {ticket} not found")
+
+        sym = str(p.symbol)
+        self.s.ensure_symbol(sym)
+
+        cur_sl = float(getattr(p, "sl", 0.0) or 0.0)
+        cur_tp = float(getattr(p, "tp", 0.0) or 0.0)
+
+        new_sl = float(sl) if sl is not None else cur_sl
+        new_tp = float(tp) if tp is not None else cur_tp
+
+        req = {
+            "action": MT5.TRADE_ACTION_SLTP,
+            "symbol": sym,
+            "position": int(p.ticket),
+            "sl": new_sl,
+            "tp": new_tp,
+        }
+
+        res = MT5.order_send(req)
+        d = nt_to_dict(res) if res else None
+        if not res or d.get("retcode") != MT5.TRADE_RETCODE_DONE:
+            raise HTTPException(status_code=400, detail={"error": "modify_failed", "raw": d})
+
         return d

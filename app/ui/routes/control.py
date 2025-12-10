@@ -68,21 +68,28 @@ def _apps_root() -> Path:
 def _cmd_for(target: str, action: str, *, visible: bool) -> tuple[list[str] | str, Path, dict]:
     tgt = target.lower().strip()
     act = action.lower().strip()
-    valid_targets = {"bridge","executor","scheduler","retrainer","watcher","emitter","all"}
+    valid_targets = {
+        "bridge","executor","scheduler","retrainer",
+        "retrain","watcher","emitter","governor",
+        "promoter","position_manager","all"
+    }
     if tgt not in valid_targets:
         raise HTTPException(status_code=400, detail=f"target inválido: {target}")
     if act not in ("start", "stop", "restart"):
         raise HTTPException(status_code=400, detail=f"action inválida: {action}")
 
-    # mapear nomes para o mlsl.ps1
     map_target = {
-        "bridge":"bridge",
-        "executor":"executor",
-        "scheduler":"retrain",
-        "retrainer":"retrain",
-        "watcher":"watcher",
-        "emitter":"emitter",
-        "all":"all",
+        "bridge": "bridge",
+        "executor": "executor",
+        "scheduler": "retrain",
+        "retrainer": "retrain",
+        "retrain": "retrain",
+        "watcher": "watcher",
+        "emitter": "emitter",
+        "governor": "governor",
+        "promoter": "promoter",
+        "position_manager": "position_manager",
+        "all": "all",
     }[tgt]
     verb = {"start":"up","stop":"down","restart":"restart"}[act]
 

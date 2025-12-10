@@ -71,6 +71,8 @@ a{color:inherit}
   gap: 10px;
   align-items: center;
   margin-right: 10px;
+  flex-wrap: wrap;           /* permite 2+ linhas quando há muitos serviços */
+  row-gap: 4px;
 }
 .group {
   display: flex;
@@ -82,15 +84,15 @@ a{color:inherit}
   height: 12px;
   border-radius: 999px;
   display: inline-block;
-  border: 1px solid var(--b);
+  border: 1px solid var(--border);   /* corrigido: antes var(--b) */
   box-shadow: 0 0 0 1px rgba(0,0,0,.05) inset;
 }
 .light.ok { background: var(--ok); }
 .light.warn { background: var(--warn); }
 .light.bad { background: var(--bad); }
-.light.off { background: var(--mut); opacity: .5; }
-.name { font-size: 12px; color: var(--mut); min-width: 58px; text-align: right; }
-.meta { font-size: 11px; color: var(--mut); min-width: 90px; text-align: left; }
+.light.off { background: var(--muted); opacity: .5; }  /* corrigido: antes var(--mut) */
+.name { font-size: 12px; color: var(--muted); min-width: 58px; text-align: right; }
+.meta { font-size: 11px; color: var(--muted); min-width: 90px; text-align: left; }
 
 /* ---------- Topbar & tabs ---------- */
 .topbar{
@@ -98,7 +100,7 @@ a{color:inherit}
   padding:10px 16px; position:sticky; top:0; z-index:20;
   background:var(--panel-2); border-bottom:1px solid var(--border);
 }
-.tabs{display:flex; gap:8px; align-items:center}
+.tabs{display:flex; gap:8px; align-items:center; flex-wrap:wrap;}
 .tab-link, .tab-btn{
   padding:8px 12px; border-radius:8px; border:1px solid var(--border);
   background:var(--btn-bg); color:var(--text); text-decoration:none; cursor:pointer;
@@ -110,14 +112,29 @@ a{color:inherit}
 main{ padding:16px; }
 
 /* ---------- Cards / layout ---------- */
-.wrap{display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr));}
+.wrap{
+  display:grid;
+  gap:16px;
+  grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+}
 .card{
   border:1px solid var(--border); border-radius:12px; padding:14px 16px; background:var(--panel);
   box-shadow:0 1px 3px var(--shadow);
 }
 .title{font-size:20px; font-weight:700; margin-bottom:8px;}
-.kvs div{display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed var(--border);}
-.kvs div:last-child{border-bottom:none;}
+
+/* suporta .kvs (antigo) e .kv (novo usado pelo JS) */
+.kvs div,
+.kv div{
+  display:flex;
+  justify-content:space-between;
+  padding:6px 0;
+  border-bottom:1px dashed var(--border);
+}
+.kvs div:last-child,
+.kv div:last-child{
+  border-bottom:none;
+}
 
 code,.mono{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;}
 .muted{color:var(--muted); font-size:12px;}
@@ -138,7 +155,7 @@ thead tr{border-bottom:1px solid var(--border);}
 tbody tr{border-bottom:1px solid var(--border);}
 .tag{padding:2px 6px; border-radius:6px; background:var(--tag-bg); color:var(--tag-fg); font-size:12px;}
 .toolbar{display:flex; gap:8px; flex-wrap:wrap; margin:10px 0 16px;}
-.actions{display:flex; gap:6px;}
+.actions{display:flex; gap:6px; flex-wrap:wrap;}
 .btn-small{padding:4px 8px; font-size:12px; border-radius:6px;}
 
 .pre{
@@ -156,7 +173,7 @@ tbody tr{border-bottom:1px solid var(--border);}
   font-size: 13px;
   font-weight: 500;
   transition: all 0.3s ease;
-  border-bottom: 1px solid var(--b);
+  border-bottom: 1px solid var(--border);   /* corrigido: antes var(--b) */
 }
 .status-banner.ok {
   background-color: rgba(0, 200, 0, 0.1);
@@ -172,7 +189,7 @@ tbody tr{border-bottom:1px solid var(--border);}
 }
 .status-banner.off {
   background-color: rgba(128, 128, 128, 0.1);
-  color: var(--mut);
+  color: var(--muted);   /* corrigido: antes var(--mut) */
 }
 
 /* ---------- Portfolio Top-K ---------- */

@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>MLSL Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <!-- CSS -->
+    <link rel="stylesheet" href="/static/css/app.css?v=20251203">
+  </head>
+  <body>
+    <header class="topbar">
+      <nav class="tabs">
+        <a href="#dash"    class="tab-link active" data-tab="dash">Dashboard</a>
+        <a href="#ops"     class="tab-link"        data-tab="ops">Ops</a>
+        <a href="#control" class="tab-link"        data-tab="control">Control</a>
+      </nav>
+      <div class="topbar-right">
+        <div class="lights">
+          <div class="group">
+            <span class="name">Bridge</span>
+            <span id="light-bridge" class="light off"></span>
+            <span id="meta-bridge" class="meta"></span>
+          </div>
+          <div class="group">
+            <span class="name">Executor</span>
+            <span id="light-exec" class="light off"></span>
+            <span id="meta-exec" class="meta"></span>
+          </div>
+          <div class="group">
+            <span class="name">Retrain</span>
+            <span id="light-retrain" class="light off"></span>
+            <span id="meta-retrain" class="meta"></span>
+          </div>
+          <div class="group">
+            <span class="name">Watcher</span>
+            <span id="light-watcher" class="light off"></span>
+            <span id="meta-watcher" class="meta"></span>
+          </div>
+          <div class="group">
+            <span class="name">Emitter</span>
+            <span id="light-emitter" class="light off"></span>
+            <span id="meta-emitter" class="meta"></span>
+          </div>
+          <div class="group">
+            <span class="name">Gov.</span>
+            <span id="light-governor" class="light off"></span>
+            <span id="meta-governor" class="meta"></span>
+          </div>
+          <div class="group">
+            <span class="name">Promo</span>
+            <span id="light-promoter" class="light off"></span>
+            <span id="meta-promoter" class="meta"></span>
+          </div>
+          <div class="group">
+            <span class="name">Pos. Mgr</span>
+            <span id="light-posmanager" class="light off"></span>
+            <span id="meta-posmanager" class="meta"></span>
+          </div>
+        </div>
+        <button id="themeToggle" class="btn-small" title="Alternar tema">☀️</button>
+      </div>
+    </header>
+
+    <div id="globalStatus" class="status-banner off">
+      ⚫ Sem ligação à API
+    </div>
+
+    <main>
+      <!-- ====================== TAB DASHBOARD ====================== -->
+      <div id="tab-dash" class="tab active">
+        <div class="toolbar">
+          <span id="ts" class="muted">A iniciar…</span>
+          <button id="refreshBtn" class="btn-small">Atualizar agora</button>
+          <span id="healthLine" class="muted"></span>
+        </div>
+
+        <!-- Cards de serviços -->
+        <div class="wrap">
+          <!-- Bridge -->
+          <div class="card">
+            <div class="title">Bridge</div>
+            <div class="kvs" id="bridgeCard"></div>
+          </div>
+
+          <!-- Executor -->
+          <div class="card">
+            <div class="title">Executor</div>
+            <div class="kvs" id="executorCard"></div>
+          </div>
+
+          <!-- Scheduler / Retrain -->
+          <div class="card">
+            <div class="title">Scheduler (Retrain)</div>
+            <div class="kvs" id="retrainCard"></div>
+          </div>
+
+          <!-- Watcher -->
+          <div class="card">
+            <div class="title">Watcher</div>
+            <div class="kvs" id="watcherCard"></div>
+          </div>
+
+          <!-- Emitter -->
+          <div class="card">
+            <div class="title">Emitter</div>
+            <div class="kvs" id="emitterCard"></div>
+          </div>
+
+          <!-- Governor -->
+          <div class="card">
+            <div class="title">Governor</div>
+            <div class="kvs" id="governorCard"></div>
+          </div>
+
+          <!-- Promoter -->
+          <div class="card">
+            <div class="title">Promoter</div>
+            <div class="kvs" id="promoterCard"></div>
+          </div>
+
+          <!-- Position Manager -->
+          <div class="card">
+            <div class="title">Position Manager</div>
+            <div class="kvs" id="posManagerCard"></div>
+          </div>
+        </div>
+
+        <!-- Proc control (atalho rápido) -->
+        <div class="card" style="margin-top:16px">
+          <div class="title">Serviços (atalho)</div>
+          <div class="toolbar">
+            <label>Service:
+              <select id="procTarget">
+                <option value="bridge">bridge</option>
+                <option value="executor">executor</option>
+                <option value="retrain">retrain</option>
+                <option value="watcher">watcher</option>
+                <option value="emitter">emitter</option>
+                <option value="governor">governor</option>
+                <option value="promoter">promoter</option>
+                <option value="position_manager">position_manager</option>
+                <option value="all">all</option>
+              </select>
+            </label>
+            <button id="procUpBtn" class="btn-small">Up</button>
+            <button id="procDownBtn" class="btn-small">Down</button>
+            <button id="procRestartBtn" class="btn-small">Restart</button>
+          </div>
+        </div>
+
+        <!-- Jobs & Schedule -->
+        <div class="card" style="margin-top:16px">
+          <div class="title">Jobs &amp; Schedule de Retrain</div>
+          <div class="toolbar">
+            <button id="runDueBtn" class="btn-small">Run Due</button>
+            <button id="runAllBtn" class="btn-small">Run All</button>
+            <button id="rebuildBtn" class="btn-small">Rebuild Schedule</button>
+            <button id="viewScheduleBtn" class="btn-small">Ver Schedule</button>
+          </div>
+          <div id="strategies"></div>
+          <pre id="scheduleYaml" class="pre" style="margin-top:8px; display:none"></pre>
+        </div>
+
+        <!-- Portfolio em SECÇÃO própria (não dentro da grelha principal) -->
+        <div class="card" style="margin-top:16px">
+          <div class="title">Portfolio Top-K</div>
+          <div id="portfolioBox">
+            <div class="muted">A carregar…</div>
+          </div>
+        </div>
+
+        <!-- Logs -->
+        <div class="card" style="margin-top:16px">
+          <div class="title">Logs</div>
+          <textarea id="out" class="pre" rows="14" style="width:100%; max-height:50vh"></textarea>
+        </div>
+      </div>
+
+      <!-- ====================== TAB OPS ====================== -->
+      <div id="tab-ops" class="tab">
+        <div class="card">
+          <div class="title">Ops (rápido)</div>
+          <div class="toolbar">
+            <select id="opsTarget">
+              <option>all</option>
+              <option>bridge</option>
+              <option>executor</option>
+              <option>retrain</option>
+              <option>watcher</option>
+              <option>emitter</option>
+              <option>governor</option>
+              <option>promoter</option>
+              <option>position_manager</option>
+            </select>
+            <button onclick="opsRun('up')" class="btn-small">Up</button>
+            <button onclick="opsRun('down')" class="btn-small">Down</button>
+            <button onclick="opsRun('restart')" class="btn-small">Restart</button>
+            <button onclick="opsStatus()" class="btn-small">Status</button>
+          </div>
+          <textarea id="opsOut" class="pre" style="width:100%;height:60vh"></textarea>
+        </div>
+      </div>
+
+      <!-- ====================== TAB CONTROL ====================== -->
+      <div id="tab-control" class="tab">
+        <h2 class="title" style="margin:8px 0">Control Panel</h2>
+        <div class="muted">
+          Arranque/Paragem dos serviços e emissão de comandos. A API key é guardada localmente no browser.
+        </div>
+
+        <div class="card" style="margin-top:12px">
+          <label>API Key:
+            <input id="api-key" type="password" placeholder="X-API-Key" style="margin-left:6px">
+          </label>
+          <button id="save-key" class="btn-small" style="margin-left:6px">Guardar</button>
+        </div>
+
+        <div class="card">
+          <div class="title">Bridge</div>
+          <button id="btn-bridge-start">Start</button>
+          <button id="btn-bridge-start-vis">Start (visível)</button>
+          <button id="btn-bridge-stop">Stop</button>
+          <button id="btn-bridge-restart">Restart</button>
+          <button id="btn-bridge-restart-vis">Restart (visível)</button>
+        </div>
+
+        <div class="card">
+          <div class="title">Executor</div>
+          <button id="btn-executor-start">Start</button>
+          <button id="btn-executor-start-vis">Start (visível)</button>
+          <button id="btn-executor-stop">Stop</button>
+          <button id="btn-executor-restart">Restart</button>
+          <button id="btn-executor-restart-vis">Restart (visível)</button>
+        </div>
+
+        <div class="card">
+          <div class="title">Scheduler (Retrain)</div>
+          <button id="btn-scheduler-start">Start</button>
+          <button id="btn-scheduler-start-vis">Start (visível)</button>
+          <button id="btn-scheduler-stop">Stop</button>
+          <button id="btn-scheduler-restart">Restart</button>
+          <button id="btn-scheduler-restart-vis">Restart (visível)</button>
+        </div>
+
+        <div class="card">
+          <div class="title">Watcher</div>
+          <button id="btn-watcher-start">Start</button>
+          <button id="btn-watcher-start-vis">Start (visível)</button>
+          <button id="btn-watcher-stop">Stop</button>
+          <button id="btn-watcher-restart">Restart</button>
+          <button id="btn-watcher-restart-vis">Restart (visível)</button>
+        </div>
+
+        <div class="card">
+          <div class="title">Emitter</div>
+          <button id="btn-emitter-start">Start</button>
+          <button id="btn-emitter-start-vis">Start (visível)</button>
+          <button id="btn-emitter-stop">Stop</button>
+          <button id="btn-emitter-restart">Restart</button>
+          <button id="btn-emitter-restart-vis">Restart (visível)</button>
+        </div>
+
+        <div class="card">
+          <div class="title">Governor</div>
+          <button id="btn-governor-start">Start</button>
+          <button id="btn-governor-start-vis">Start (visível)</button>
+          <button id="btn-governor-stop">Stop</button>
+          <button id="btn-governor-restart">Restart</button>
+          <button id="btn-governor-restart-vis">Restart (visível)</button>
+        </div>
+
+        <div class="card">
+          <div class="title">Promoter</div>
+          <button id="btn-promoter-start">Start</button>
+          <button id="btn-promoter-start-vis">Start (visível)</button>
+          <button id="btn-promoter-stop">Stop</button>
+          <button id="btn-promoter-restart">Restart</button>
+          <button id="btn-promoter-restart-vis">Restart (visível)</button>
+        </div>
+
+        <div class="card">
+          <div class="title">All</div>
+          <button id="btn-all-start">ALL Start</button>
+          <button id="btn-all-stop">ALL Stop</button>
+          <button id="btn-all-restart">ALL Restart</button>
+        </div>
+
+        <div class="card">
+          <div class="title">Output</div>
+          <textarea id="ops-output" rows="14" style="width:100%" readonly></textarea>
+        </div>
+      </div>
+    </main>
+
+    <!-- Config da API (ajusta a origin se for preciso) -->
+    <script>
+      // Bridge FastAPI
+      window.API_ORIGIN = "http://127.0.0.1:5005";
+      window.API_BASE   = "/ui/api";
+    </script>
+    <!-- JS comum (tabs + theme + api helper) -->
+    <script src="/static/js/common.js?v=20251203"></script>
+    <!-- Dashboard (health, strategies, portfolio, logs) -->
+    <script src="/static/js/dashboard.js?v=20251203"></script>
+    <!-- Ops & Control -->
+    <script src="/static/js/ops.js?v=20251015"></script>
+    <script src="/static/js/control.js?v=20251015"></script>
+  </body>
+</html>

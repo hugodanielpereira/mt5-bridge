@@ -205,3 +205,32 @@ def history(
     deals.sort(key=lambda x: x["time"] or "")
 
     return {"orders": orders, "deals": deals}
+
+# --- NOVA ROTA PARA O LAB (MT5-Bridge Connector) -----------------------------
+
+@router.post("/bridge/history")
+def bridge_history(
+    payload: dict,
+    _: None = Depends(_require_api_key),
+):
+    """
+    Endpoint usado exclusivamente pelo ML-Strategy-Lab.
+    A resposta vem diretamente do MT5Service().ohlcv().
+    """
+    symbol = payload.get("symbol")
+    timeframe = payload.get("timeframe")
+    start = payload.get("start")
+    end = payload.get("end")
+    limit = payload.get("limit", 1000)
+
+    if not symbol or not timeframe:
+        raise HTTPException(status_code=400, detail="Fields 'symbol' and 'timeframe' are required")
+
+    svc = MT5Service()
+    svc.ensure_up()
+
+    try:
+        data = svc.ohlcv(symbol=symbol, tf=timeframe, start=start, end=end, limit=limit)
+        return {"ok": True, "data": data}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

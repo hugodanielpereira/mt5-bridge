@@ -1,34 +1,30 @@
 <!-- app/ui/templates/control.html -->
 <!doctype html>
-<meta charset="utf-8">
-<title>MLSL Control Panel</title>
-<link rel="stylesheet" href="/ui/static/css/app.css">
-
+<html lang="pt">
+<head>
+  <meta charset="utf-8">
+  <title>MLSL Control Panel</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="/ui/static/css/app.css">
+</head>
+<body>
 <header class="topbar">
   <nav class="tabs">
-    <a class="tab-link" href="/ui/" data-tablink="dash">Dashboard</a>
-    <a class="tab-link" href="/ui/?tab=ops" data-tablink="ops">Ops</a>
-    <a class="tab-link active" href="/ui/control/" data-tablink="control">Control</a>
+    <a class="tab-link" href="/ui/?tab=dash" data-tab="dash">Dashboard</a>
+    <a class="tab-link" href="/ui/?tab=ops"  data-tab="ops">Ops</a>
+    <a class="tab-link active" href="/ui/control/" data-tab="control">Control</a>
   </nav>
   <div class="topbar-right">
-    <button id="themeToggle" class="btn-small" title="Alternar tema">☀</button>
+    <button id="themeToggle" class="btn-small" title="Alternar tema">☀️</button>
   </div>
 </header>
 
-<script>
-  (function(){
-    const KEY='THEME';
-    function getTheme(){ const s=(localStorage.getItem(KEY)||'').toLowerCase(); return (s==='light'||s==='dark')?s:'dark'; }
-    function apply(t){ document.documentElement.classList.toggle('light', t==='light'); const b=document.getElementById('themeToggle'); if(b) b.textContent=(t==='dark')?'☀':'☾'; localStorage.setItem(KEY,t); }
-    apply(getTheme());
-    const btn=document.getElementById('themeToggle');
-    if(btn) btn.addEventListener('click', ()=>apply(getTheme()==='dark'?'light':'dark'));
-  })();
-</script>
-
 <main>
   <h2 class="title" style="margin:8px 0">Control Panel</h2>
-  <div class="muted">Arranque/Paragem dos serviços e emissão de comandos. A API key é guardada localmente no browser.</div>
+  <div class="muted">
+    Arranque/Paragem dos serviços e emissão de comandos via <code>/ui/ops/run</code>.
+    A API key é guardada localmente no browser.
+  </div>
 
   <div class="card" style="margin-top:12px">
     <label>API Key:
@@ -53,7 +49,7 @@
     <button id="btn-executor-restart-vis">Restart (visível)</button>
   </div>
 
-  <div class="card"><div class="title">Scheduler (Retrain)</div>
+  <div class="card"><div class="title">Scheduler / Retrain</div>
     <button id="btn-scheduler-start">Start</button>
     <button id="btn-scheduler-start-vis">Start (visível)</button>
     <button id="btn-scheduler-stop">Stop</button>
@@ -61,7 +57,6 @@
     <button id="btn-scheduler-restart-vis">Restart (visível)</button>
   </div>
 
-  <!-- NOVO: Watcher -->
   <div class="card"><div class="title">Watcher</div>
     <button id="btn-watcher-start">Start</button>
     <button id="btn-watcher-start-vis">Start (visível)</button>
@@ -70,7 +65,6 @@
     <button id="btn-watcher-restart-vis">Restart (visível)</button>
   </div>
 
-  <!-- NOVO: Emitter -->
   <div class="card"><div class="title">Emitter</div>
     <button id="btn-emitter-start">Start</button>
     <button id="btn-emitter-start-vis">Start (visível)</button>
@@ -79,7 +73,6 @@
     <button id="btn-emitter-restart-vis">Restart (visível)</button>
   </div>
 
-  <!-- (Opcional) Governor -->
   <div class="card"><div class="title">Governor</div>
     <button id="btn-governor-start">Start</button>
     <button id="btn-governor-start-vis">Start (visível)</button>
@@ -88,13 +81,20 @@
     <button id="btn-governor-restart-vis">Restart (visível)</button>
   </div>
 
-  <!-- (Opcional) Promoter -->
   <div class="card"><div class="title">Promoter</div>
     <button id="btn-promoter-start">Start</button>
     <button id="btn-promoter-start-vis">Start (visível)</button>
     <button id="btn-promoter-stop">Stop</button>
     <button id="btn-promoter-restart">Restart</button>
     <button id="btn-promoter-restart-vis">Restart (visível)</button>
+  </div>
+
+  <div class="card"><div class="title">Position Manager</div>
+    <button id="btn-position_manager-start">Start</button>
+    <button id="btn-position_manager-start-vis">Start (visível)</button>
+    <button id="btn-position_manager-stop">Stop</button>
+    <button id="btn-position_manager-restart">Restart</button>
+    <button id="btn-position_manager-restart-vis">Restart (visível)</button>
   </div>
 
   <div class="card"><div class="title">All</div>
@@ -109,4 +109,7 @@
   </div>
 </main>
 
+<script src="/ui/static/js/common.js"></script>
 <script src="/ui/static/js/control.js"></script>
+</body>
+</html>

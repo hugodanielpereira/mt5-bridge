@@ -88,11 +88,14 @@ class MT5Service:
             args_joined = (args_joined + " /portable").strip()
 
         # --- validações -----------------------------------------------------
-        if not exe or not Path(exe).exists():
-            raise RuntimeError(f"MT5_TERMINAL_PATH inválido: {raw_path!r}")
+        # Em Linux+Wine, o Path("C:\\...") não reflete o path real no host,
+        # por isso não usamos Path.exists() aqui. Deixamos o MT5Session/MT5
+        # queixarem-se se for mesmo inválido.
+        if not exe:
+            raise RuntimeError(f"MT5_TERMINAL_PATH vazio ou não definido: {raw_path!r}")
 
         # guardas para diagnóstico
-        self.exe_path: str = exe                      # string do .env (mantemos para logging)
+        self.exe_path: str = exe
         self.exe_args: str = args_joined
 
         # --- credenciais por ambiente --------------------------------------

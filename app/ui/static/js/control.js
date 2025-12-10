@@ -1,18 +1,21 @@
-// bridges\mt5-bridge\app\ui\static\js\control.js
+// app/ui/static/js/control.js
 (async function () {
   const $key = document.querySelector("#api-key");
   const $save = document.querySelector("#save-key");
   const $out = document.querySelector("#ops-output");
 
   // carregar / guardar API key
-  $key.value = localStorage.getItem("X_API_KEY") || "";
-  $save.addEventListener("click", () => {
-    localStorage.setItem("X_API_KEY", $key.value.trim());
-    $out.value += "✓ API key guardada.\n";
-    $out.scrollTop = $out.scrollHeight;
-  });
+  if ($key && $save && $out) {
+    $key.value = localStorage.getItem("X_API_KEY") || "";
+    $save.addEventListener("click", () => {
+      localStorage.setItem("X_API_KEY", $key.value.trim());
+      $out.value += "✓ API key guardada.\n";
+      $out.scrollTop = $out.scrollHeight;
+    });
+  }
 
   async function call(target, action, visible=false) {
+    if (!$out) return;
     $out.value += `\n> ${target} ${action}${visible?" (visível)":" (captura)"}…\n`;
     $out.scrollTop = $out.scrollHeight;
     const body = { target, action, visible };
@@ -52,7 +55,7 @@
     $out.scrollTop = $out.scrollHeight;
   }
 
-  // 🔧 Liga TODOS os botões (inclui watcher/emitter + governor/promoter)
+  // wiring de todos os botões
   const wiring = [
     // bridge
     ["bridge","start"],["bridge","stop"],["bridge","restart"],
@@ -69,12 +72,15 @@
     // emitter
     ["emitter","start"],["emitter","stop"],["emitter","restart"],
     ["emitter","start","vis"],["emitter","restart","vis"],
-    // governor (opcional)
+    // governor
     ["governor","start"],["governor","stop"],["governor","restart"],
     ["governor","start","vis"],["governor","restart","vis"],
-    // promoter (opcional)
+    // promoter
     ["promoter","start"],["promoter","stop"],["promoter","restart"],
     ["promoter","start","vis"],["promoter","restart","vis"],
+    // position_manager
+    ["position_manager","start"],["position_manager","stop"],["position_manager","restart"],
+    ["position_manager","start","vis"],["position_manager","restart","vis"],
     // all
     ["all","start"],["all","stop"],["all","restart"],
   ];

@@ -17,7 +17,7 @@ router = APIRouter(prefix="/ui/api", tags=["ui-dash"])
 # Helpers
 # ---------------------------------------------------
 def _apps_root() -> Path:
-    # 1) .env oficial
+    # 1) .env oficial (ideal: PROJECT_DIR = .../apps/ml-strategy-lab)
     env = os.getenv("PROJECT_DIR")
     if env:
         return Path(env)
@@ -25,12 +25,13 @@ def _apps_root() -> Path:
     env2 = os.getenv("MLSL_APPS_DIR")
     if env2:
         return Path(env2)
-    # 3) heurística
+    # 3) heurística (quando tudo falha)
     here = Path(__file__).resolve()
-    # .../app/ui/routes/api_dash.py  -> parents[4] ~ .../apps/bridges/mt5-bridge/app/ui/routes
-    bridges_dir = here.parents[4]
-    root = bridges_dir.parent
-    return root / "apps" / "ml-strategy-lab"
+    # .../bridges/mt5-bridge/app/ui/routes/api_dash.py
+    # queremos .../apps/ml-strategy-lab
+    bridges_dir = here.parents[4]  # mt5-bridge
+    root = bridges_dir.parent      # bridges
+    return root.parent / "apps" / "ml-strategy-lab"
 
 def _python_exe() -> str:
     return os.getenv("VENV_PY") or "python"
@@ -59,6 +60,10 @@ def _signals_dir() -> Path:
     return _apps_root() / "outputs" / "live" / "signals"
 
 def _logs_dir() -> Path:
+    # ⚠️ Estes logs são os do LAB (não os da raiz ~/Trading/logs)
+    env = os.getenv("LAB_LOGS_DIR")
+    if env:
+        return Path(env)
     return _apps_root() / "outputs" / "live" / "logs"
 
 def _norm_key(symbol: str | None, timeframe: str | None) -> str:
@@ -101,7 +106,7 @@ def _run(cmd: list[str] | str, cwd: Optional[Path] = None, env: Optional[Dict[st
         return {"rc": p.returncode, "stdout": p.stdout or "", "stderr": p.stderr or ""}
     except Exception as e:
         return {"rc": -1, "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
-    
+
 def _portfolio_file() -> Path:
     env = os.getenv("PORTFOLIO_FILE")
     if env:
@@ -331,6 +336,60 @@ def _safe_join(base: Path, name: str) -> Path:
         raise HTTPException(status_code=400, detail="invalid path")
     return p
 
+# ================== MÉTRICAS via CSV (proc_monitor) =================
+
+def _metrics_csv() -> Path:
+    env = os.getenv("PROC_METRICS_FILE")
+    if env:
+        return Path(env)
+    return _apps_root() / "outputs" / "live" / "metrics" / "proc_metrics.csv"
+
+def _last_metrics_for(service: str) -> Dict[str, Any]:
+    """
+    Lê o último registo de métricas para um dado 'service' a partir do
+    proc_metrics.csv gerado pelo tools.proc_monitor.
+    """
+    path = _metrics_csv()
+    if not path.exists():
+        return {}
+    try:
+        import csv  # lazy import para não falhar se faltar
+        with path.open("r", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        if not rows:
+            return {}
+        for row in reversed(rows):
+            if (row.get("service") or "").strip().lower() != service.strip().lower():
+                continue
+            def _to_int(key: str) -> Optional[int]:
+                v = (row.get(key) or "").strip()
+                if not v:
+                    return None
+                try:
+                    return int(float(v))
+                except Exception:
+                    return None
+            def _to_float(key: str) -> Optional[float]:
+                v = (row.get(key) or "").strip()
+                if not v:
+                    return None
+                try:
+                    return float(v)
+                except Exception:
+                    return None
+            return {
+                "pid": _to_int("pid"),
+                "cpu_pct": _to_float("cpu_pct"),
+                "mem_mb": _to_float("rss_mb"),
+                "uptime_s": _to_float("uptime_s"),
+                "threads": _to_int("threads"),
+                "sys_cpu_pct": _to_float("sys_cpu_pct"),
+                "sys_mem_used_mb": _to_float("sys_mem_used_mb"),
+                "sys_mem_total_mb": _to_float("sys_mem_total_mb"),
+            }
+    except Exception:
+        return {}
+
 # ---------------------------------------------------
 # Retrain controlado pela UI (NO-EMIT)
 # ---------------------------------------------------
@@ -409,7 +468,7 @@ def retrain_rebuild():
 # ---------------------------------------------------
 # Dados p/ Dashboard
 # ---------------------------------------------------
-LOGS_DIR  = _apps_root() / "outputs" / "live" / "logs"
+LOGS_DIR  = _logs_dir()
 
 def _log_age_min(path: Path) -> Optional[float]:
     try:
@@ -432,7 +491,7 @@ def _log_age_min_multi(base: Path, names: list[str]) -> tuple[Optional[float], O
             return age, str(p)
     return None, None
 
-STATE_DIR = _apps_root() / "outputs" / "live" / "state"
+STATE_DIR = _state_dir()
 
 def _read_state_json(name: str) -> dict:
     """Lê um ficheiro de estado JSON do outputs/live/state (ex: promoter-state.json)."""
@@ -471,27 +530,57 @@ def status():
         "app\\main.py",
     ]
     bp = _locate_proc(bridge_pid, bridge_needles) or _find_proc(bridge_needles)
+
     def _pmet(p): return _proc_metrics(p) if p else {"pid": None, "cpu_s": None, "mem_mb": None, "uptime_s": None}
     bmet = _pmet(bp)
+
+    # CSV metrics override (proc_monitor)
+    bcsv = _last_metrics_for("bridge")
+    if bcsv:
+        bmet["pid"] = bcsv.get("pid") or bmet.get("pid")
+        # não temos cpu_s no CSV, mas temos cpu_pct se quiseres usar no futuro
+        bmet["mem_mb"] = bcsv.get("mem_mb") or bmet.get("mem_mb")
+        bmet["uptime_s"] = bcsv.get("uptime_s") or bmet.get("uptime_s")
 
     # --- EXECUTOR ---
     exec_pid = _read_pid("mlsl-executor.pid") or _read_pid_multi("executor")
     exec_needles = ["services.executor.loop", "executor.loop", "run_execute_live_mt5"]
     pe = _locate_proc(exec_pid, exec_needles)
     exec_info = _pmet(pe)
+    exec_csv = _last_metrics_for("executor")
+    if exec_csv:
+        exec_info["pid"] = exec_csv.get("pid") or exec_info.get("pid")
+        exec_info["mem_mb"] = exec_csv.get("mem_mb") or exec_info.get("mem_mb")
+        exec_info["uptime_s"] = exec_csv.get("uptime_s") or exec_info.get("uptime_s")
     exec_age, exec_file = _log_age_min_multi(
-        _logs_dir(),
+        LOGS_DIR,
         ["executor.log", "executor.stdout.log", "executor.stderr.log"]
     )
     exec_fresh = (exec_age is not None) and (exec_age <= float(os.getenv("EXEC_FRESH_MAX_AGE_MIN","5")))
 
     # --- RETRAIN ---
     retr_pid = _read_pid("mlsl-retrain.pid") or _read_pid_multi("retrain")
-    retr_needles = ["services.scheduler_retrain", "scheduler_retrain", "tools.retrain_incremental"]
+    retr_needles = [
+        "services.retrain",
+        "services.scheduler_retrain",
+        "scheduler_retrain",
+        "tools.retrain_incremental",
+    ]
     pr = _locate_proc(retr_pid, retr_needles)
     retr_info = _pmet(pr)
     retr_age, retr_file = _log_age_min_multi(
         _logs_dir(),
+        ["retrain.log", "scheduler_retrain.log", "scheduler_retrain.stdout.log", "scheduler_retrain.stderr.log"]
+    )
+    retr_fresh = (retr_age is not None) and (retr_age <= float(os.getenv("SCHED_FRESH_MAX_AGE_MIN","10")))
+    retr_info = _pmet(pr)
+    retr_csv = _last_metrics_for("retrain")
+    if retr_csv:
+        retr_info["pid"] = retr_csv.get("pid") or retr_info.get("pid")
+        retr_info["mem_mb"] = retr_csv.get("mem_mb") or retr_info.get("mem_mb")
+        retr_info["uptime_s"] = retr_csv.get("uptime_s") or retr_info.get("uptime_s")
+    retr_age, retr_file = _log_age_min_multi(
+        LOGS_DIR,
         ["scheduler_retrain.log", "scheduler_retrain.stdout.log", "scheduler_retrain.stderr.log"]
     )
     retr_fresh = (retr_age is not None) and (retr_age <= float(os.getenv("SCHED_FRESH_MAX_AGE_MIN","10")))
@@ -501,8 +590,13 @@ def status():
     watch_needles = ["tools.watch_signals", "watch_signals.py", "watcher"]
     wp = _locate_proc(watch_pid, watch_needles) or _find_proc(watch_needles)
     wmet = _pmet(wp)
+    wcsv = _last_metrics_for("watcher")
+    if wcsv:
+        wmet["pid"] = wcsv.get("pid") or wmet.get("pid")
+        wmet["mem_mb"] = wcsv.get("mem_mb") or wmet.get("mem_mb")
+        wmet["uptime_s"] = wcsv.get("uptime_s") or wmet.get("uptime_s")
     watch_age, watch_file = _log_age_min_multi(
-        _logs_dir(),
+        LOGS_DIR,
         ["watch_signals.log", "watch_signals.stdout.log", "watch_signals.stderr.log"]
     )
     watch_fresh = bool(wmet.get("pid")) or (watch_age is not None and watch_age <= int(os.getenv("WATCH_FRESH_MAX_AGE_MIN","5")))
@@ -512,8 +606,13 @@ def status():
     emit_needles = ["services.emitter.loop", "emitter.loop"]
     ep = _locate_proc(emit_pid, emit_needles) or _find_proc(emit_needles)
     emet = _pmet(ep)
+    ecsv = _last_metrics_for("emitter")
+    if ecsv:
+        emet["pid"] = ecsv.get("pid") or emet.get("pid")
+        emet["mem_mb"] = ecsv.get("mem_mb") or emet.get("mem_mb")
+        emet["uptime_s"] = ecsv.get("uptime_s") or emet.get("uptime_s")
     emitter_age, emitter_file = _log_age_min_multi(
-        _logs_dir(),
+        LOGS_DIR,
         ["emitter.log", "emitter.stdout.log", "emitter.stderr.log"]
     )
     emitter_fresh = bool(emet.get("pid")) or (emitter_age is not None and emitter_age <= int(os.getenv("EMITTER_FRESH_MAX_AGE_MIN","5")))
@@ -523,7 +622,14 @@ def status():
     gov_needles = ["tools.asset_governor", "asset_governor.py", "governor loop"]
     pg = _locate_proc(gov_pid, gov_needles) or _find_proc(gov_needles)
     gov_info = _pmet(pg)
-    gov_age, gov_file = _log_age_min_multi(_logs_dir(), ["governor.log","asset_governor.log","governor.stdout.log","governor.stderr.log"])
+    gcsv = _last_metrics_for("governor")
+    if gcsv:
+        gov_info["pid"] = gcsv.get("pid") or gov_info.get("pid")
+        gov_info["mem_mb"] = gcsv.get("mem_mb") or gov_info.get("mem_mb")
+        gov_info["uptime_s"] = gcsv.get("uptime_s") or gov_info.get("uptime_s")
+    gov_age, gov_file = _log_age_min_multi(
+        LOGS_DIR, ["governor.log","asset_governor.log","governor.stdout.log","governor.stderr.log"]
+    )
     gov_fresh = bool(gov_info.get("pid")) or (gov_age is not None and gov_age <= int(os.getenv("GOV_FRESH_MAX_AGE_MIN","15")))
 
     # ler governor-state.json (min_pf/top_k/itens)
@@ -538,13 +644,33 @@ def status():
     pro_needles = ["tools.promote_model","promote_model.py","promoter loop"]
     pp = _locate_proc(pro_pid, pro_needles) or _find_proc(pro_needles)
     pro_info = _pmet(pp)
-    pro_age, pro_file = _log_age_min_multi(_logs_dir(), ["promoter.log","promote.log","promoter.stdout.log","promoter.stderr.log"])
+    pcsv = _last_metrics_for("promoter")
+    if pcsv:
+        pro_info["pid"] = pcsv.get("pid") or pro_info.get("pid")
+        pro_info["mem_mb"] = pcsv.get("mem_mb") or pro_info.get("mem_mb")
+        pro_info["uptime_s"] = pcsv.get("uptime_s") or pro_info.get("uptime_s")
+    pro_age, pro_file = _log_age_min_multi(
+        LOGS_DIR, ["promoter.log","promote.log","promoter.stdout.log","promoter.stderr.log"]
+    )
     pro_fresh = bool(pro_info.get("pid")) or (pro_age is not None and pro_age <= int(os.getenv("PROMO_FRESH_MAX_AGE_MIN","30")))
 
     # ler promoter-state.json (scan_every_min/require_model_ok)
     pro_state = _read_json_safe(_state_dir() / "promoter-state.json")
     scan_every_min = pro_state.get("scan_every_min")
     require_model_ok = pro_state.get("require_model_ok")
+
+    # --- POSITION MANAGER (novo no status principal) ---
+    pm_csv = _last_metrics_for("position_manager")
+    pm_pid = pm_csv.get("pid") if pm_csv else None
+    pm_info = {
+        "pid": pm_pid,
+        "cpu_s": None,  # não temos cpu_s no CSV
+        "mem_mb": pm_csv.get("mem_mb") if pm_csv else None,
+        "uptime_s": pm_csv.get("uptime_s") if pm_csv else None,
+        "log_age_min": None,
+        "fresh": bool(pm_pid),
+        "log_file": None,
+    }
 
     return {
         "bridge": {
@@ -617,6 +743,7 @@ def status():
             "scan_every_min": scan_every_min,
             "require_model_ok": require_model_ok,
         },
+        "position_manager": pm_info,
     }
 
 # --- colar no app/ui/routes/api_dash.py (substitui o def strategies) ---
@@ -693,7 +820,7 @@ def strategies(include: str = Query("schedule", description="schedule|configs|bo
                 "source_url": None,
             })
 
-    # 3) Enriquecer last_run/next_in para os do schedule (como já fazias)
+    # 3) Enriquecer last_run/next_in para os do schedule
     last_map = _load_last_runs()
     now = time.time()
     for r in rows:
@@ -705,7 +832,10 @@ def strategies(include: str = Query("schedule", description="schedule|configs|bo
             latest_dir = _models_latest_dir(r.get("symbol"), r.get("timeframe"))
             if latest_dir.exists():
                 try:
-                    last_ts = max((f.stat().st_mtime for f in latest_dir.rglob('*') if f.is_file()), default=None)
+                    last_ts = max(
+                        (f.stat().st_mtime for f in latest_dir.rglob('*') if f.is_file()),
+                        default=None
+                    )
                 except Exception:
                     last_ts = None
         if last_ts:
@@ -731,43 +861,48 @@ def executor_state():
     # fresh por idade de log (com fallbacks)
     fresh_min = int(os.getenv("EXEC_FRESH_MAX_AGE_MIN", "5"))
     age_min, used = _log_age_min_multi(
-        _logs_dir(),
+        LOGS_DIR,
         ["executor.log", "executor.stdout.log", "executor.stderr.log"]
     )
     fresh = (age_min is not None) and (age_min <= fresh_min)
 
-    # métricas do processo
-    pid = _read_pid_multi("executor")
-    p = _proc_from_pid(pid) or _find_proc([
-        "services.executor.loop", "executor.loop", "run_execute_live_mt5"
-    ])
-    met = _proc_metrics(p) if p else {}
-
+    # métricas a partir do CSV (proc_monitor)
+    m = _last_metrics_for("executor")
+    pid = m.get("pid")
     return {
-        "fresh": fresh if age_min is not None else bool(met.get("pid")),
+        "fresh": fresh if age_min is not None else bool(pid),
         "age_min": age_min,
         "log_file": used,
         "last_signal_ts": None,
-        "pid": met.get("pid"),
-        "cpu_s": met.get("cpu_s"),
-        "mem_mb": met.get("mem_mb"),
-        "uptime_s": met.get("uptime_s"),
+        "pid": pid,
+        "cpu_s": None,  # não temos cpu_s no CSV
+        "mem_mb": m.get("mem_mb"),
+        "uptime_s": m.get("uptime_s"),
     }
 
 @router.get("/scheduler_state")
 def scheduler_state():
+    """
+    Estado do scheduler/retrain, usando:
+      - idade dos logs (retrain.log / scheduler_retrain.log)
+      - últimas métricas vistas no proc_metrics.csv (serviço 'retrain')
+    """
     fresh_min = int(os.getenv("SCHED_FRESH_MAX_AGE_MIN", "10"))
-    age_min, used = _log_age_min_multi(
-        _logs_dir(),
-        ["scheduler_retrain.log", "scheduler_retrain.stdout.log", "scheduler_retrain.stderr.log"]
-    )
-    fresh = (age_min is not None) and (age_min <= fresh_min)
 
-    pid = _read_pid_multi("retrain")
-    p = _proc_from_pid(pid) or _find_proc([
-        "services.scheduler_retrain", "scheduler_retrain", "tools.retrain_incremental"
-    ])
-    met = _proc_metrics(p) if p else {}
+    # Considera tanto retrain.log como os nomes antigos de scheduler
+    age_min, used = _log_age_min_multi(
+        LOGS_DIR,
+        [
+            "retrain.log",                 # novo serviço services.retrain
+            "scheduler_retrain.log",       # nomes antigos, por compat
+            "scheduler_retrain.stdout.log",
+            "scheduler_retrain.stderr.log",
+        ]
+    )
+
+    # Últimas métricas do proc_monitor para o serviço "retrain"
+    m = _last_metrics_for("retrain")  # ex: {"pid": 1234, "mem_mb": 50.1, "uptime_s": 120.0, ...}
+    pid = m.get("pid")
 
     # locks (se existirem)
     locks: list[str] = []
@@ -778,53 +913,56 @@ def scheduler_state():
         if lf.exists():
             locks.append(str(lf))
 
+    # fresh: se tiver log recente usa idade; se não tiver, cai para "há PID vivo?"
+    fresh = (age_min is not None and age_min <= fresh_min) or bool(pid)
+
     return {
-        "fresh": fresh if age_min is not None else bool(met.get("pid")),
+        "fresh": fresh,
         "age_min": age_min,
         "log_file": used,
         "locks": locks,
-        "pid": met.get("pid"),
-        "cpu_s": met.get("cpu_s"),
-        "mem_mb": met.get("mem_mb"),
-        "uptime_s": met.get("uptime_s"),
+        "pid": pid,
+        "cpu_s": None,                      # não temos CPU em segundos no CSV, por isso fica None
+        "mem_mb": m.get("mem_mb"),
+        "uptime_s": m.get("uptime_s"),
     }
 
 @router.get("/watcher_state")
 def watcher_state():
-    p = _find_proc(["tools.watch_signals", "watch_signals.py", "watcher"])
-    met = _proc_metrics(p) if p else {}
+    m = _last_metrics_for("watcher")
+    pid = m.get("pid")
     age_min, used = _log_age_min_multi(
-        _logs_dir(),
+        LOGS_DIR,
         ["watch_signals.log", "watch_signals.stdout.log", "watch_signals.stderr.log"]
     )
-    fresh = bool(met.get("pid")) or (age_min is not None and age_min <= int(os.getenv("WATCH_FRESH_MAX_AGE_MIN","5")))
+    fresh = bool(pid) or (age_min is not None and age_min <= int(os.getenv("WATCH_FRESH_MAX_AGE_MIN","5")))
     return {
         "fresh": fresh,
         "age_min": age_min,
         "log_file": used,
-        "pid": met.get("pid"),
-        "cpu_s": met.get("cpu_s"),
-        "mem_mb": met.get("mem_mb"),
-        "uptime_s": met.get("uptime_s"),
+        "pid": pid,
+        "cpu_s": None,
+        "mem_mb": m.get("mem_mb"),
+        "uptime_s": m.get("uptime_s"),
     }
 
 @router.get("/emitter_state")
 def emitter_state():
-    p = _find_proc(["services.emitter.loop", "emitter.loop"])
-    met = _proc_metrics(p) if p else {}
+    m = _last_metrics_for("emitter")
+    pid = m.get("pid")
     age_min, used = _log_age_min_multi(
-        _logs_dir(),
+        LOGS_DIR,
         ["emitter.log", "emitter.stdout.log", "emitter.stderr.log"]
     )
-    fresh = bool(met.get("pid")) or (age_min is not None and age_min <= int(os.getenv("EMITTER_FRESH_MAX_AGE_MIN","5")))
+    fresh = bool(pid) or (age_min is not None and age_min <= int(os.getenv("EMITTER_FRESH_MAX_AGE_MIN","5")))
     return {
         "fresh": fresh,
         "age_min": age_min,
         "log_file": used,
-        "pid": met.get("pid"),
-        "cpu_s": met.get("cpu_s"),
-        "mem_mb": met.get("mem_mb"),
-        "uptime_s": met.get("uptime_s"),
+        "pid": pid,
+        "cpu_s": None,
+        "mem_mb": m.get("mem_mb"),
+        "uptime_s": m.get("uptime_s"),
     }
 
 @router.get("/portfolio")
@@ -868,7 +1006,7 @@ def toggle_job(job_id: str, payload: Dict[str, Any]):
     return {"ok": True}
 
 # === Logs & Failed Signals =========================================
-LOG_DIR    = _apps_root() / "outputs" / "live" / "logs"
+LOG_DIR    = LOGS_DIR
 FAILED_DIR = _apps_root() / "outputs" / "live" / "signals" / "failed"
 
 @router.get("/logs/list")

@@ -5,10 +5,11 @@
   const $bridge = document.getElementById('bridgeCard');
   const $exec = document.getElementById('executorCard');
   const $retr = document.getElementById('retrainCard');
-  const $watch = document.getElementById('watcherCard');   // opcional (se existir no HTML)
-  const $emit  = document.getElementById('emitterCard');   // opcional
-  const $gov   = document.getElementById('governorCard');  // opcional
-  const $prom  = document.getElementById('promoterCard');  // opcional
+  const $watch = document.getElementById('watcherCard');
+  const $emit  = document.getElementById('emitterCard');
+  const $gov   = document.getElementById('governorCard');
+  const $prom  = document.getElementById('promoterCard');
+  const $pm    = document.getElementById('posManagerCard');
 
   const $strategies = document.getElementById('strategies');
   const $yaml = document.getElementById('scheduleYaml');
@@ -25,7 +26,6 @@
     try { return await api('/scheduler_state'); } catch(_){ return {}; }
   }
 
-  // “é vazio/zero?” — útil para decidir quando usar fallback
   function _isMissingNum(x) {
     return x === null || x === undefined || (typeof x === 'number' && !isFinite(x));
   }
@@ -66,10 +66,8 @@
   }
   const basename = p => (p || '').split(/[\\/]/).pop() || '—';
 
-  // usa fmtNum do common.js (não redefinir aqui)
   const fmtNumSafe = (x)=> (typeof window.fmtNum==='function' ? window.fmtNum(x) : fmt1(x));
 
-  // --- helper: mostrar um log na caixa "Logs" ---
   async function showLog(name = 'retrain.log', n = 300){
     const out = document.getElementById('out');
     if (!out) return;
@@ -86,7 +84,7 @@
   let _refreshTicker = null, _refreshLeft = 0;
   function startAutoRefresh(runNow){
     const banner = document.getElementById('globalStatusCountdown');
-    const T = 15; // segundos
+    const T = 15;
     if (_refreshTicker) clearInterval(_refreshTicker);
     _refreshLeft = T;
     function tick(){
@@ -103,11 +101,11 @@
   }
 
   // -------------------------------------------------------
-  // loadHealth — bridge + executor + retrain + watcher + emitter (+ gov/prom se existirem)
+  // loadHealth — lê /ui/api/status e preenche todos os cards
   // -------------------------------------------------------
   async function loadHealth(){
     try{
-      const s = await api('/status'); // -> /ui/api/status
+      const s = await api('/status');
       if ($ts) $ts.textContent = 'Atualizado: ' + new Date().toLocaleString();
 
       // ---------- BRIDGE ----------
@@ -130,7 +128,6 @@
 
       // ---------- EXECUTOR ----------
       let e = s?.executor || {};
-      // fallback: se estiverem a faltar métricas, tenta /executor_state
       if (!e || (!e.pid && (_isMissingNum(e.cpu_s) || _isMissingNum(e.mem_mb) || _isMissingNum(e.uptime_s)))) {
         const es = await _fetchExecutorState();
         e = {
@@ -162,9 +159,8 @@
         e.uptime_s != null ? Math.round(e.uptime_s) : null
       );
 
-      // ---------- RETRAIN (scheduler) ----------
+      // ---------- RETRAIN ----------
       let r = s?.retrain || {};
-      // fallback: se estiverem a faltar métricas, tenta /scheduler_state
       if (!r || (!r.pid && (_isMissingNum(r.cpu_s) || _isMissingNum(r.mem_mb) || _isMissingNum(r.uptime_s)))) {
         const rs = await _fetchSchedulerState();
         r = {
@@ -238,7 +234,7 @@
         m.uptime_s != null ? Math.round(m.uptime_s) : null
       );
 
-      // ---------- GOVERNOR (opcional) ----------
+      // ---------- GOVERNOR ----------
       const g = s?.governor || {};
       const gs = g.state || {};
       const g_pid = g.pid ?? gs.pid;
@@ -264,7 +260,7 @@
         g_upt != null ? Math.round(g_upt) : null
       );
 
-      // ---------- PROMOTER (opcional) ----------
+      // ---------- PROMOTER ----------
       const p = s?.promoter || {};
       const ps = p.state || {};
       const p_pid = p.pid ?? ps.pid;
@@ -290,6 +286,23 @@
       if (pMeta) pMeta.textContent = fmtMeta(
         p_mem != null ? Math.round(p_mem) : null,
         p_upt != null ? Math.round(p_upt) : null
+      );
+
+      // ---------- POSITION MANAGER ----------
+      const pm = s?.position_manager || {};
+      if ($pm) {
+        kv($pm, [
+          ['PID', pm.pid ?? '—'],
+          ['Mem (MB)', pm.mem_mb != null ? Math.round(pm.mem_mb) : '—'],
+          ['Uptime', fmtUptimeSec(pm.uptime_s)],
+          ['Fresh', String(pm.fresh ?? '—')],
+        ]);
+      }
+      setLight(document.getElementById('light-posmanager'), pm.pid ? 'ok' : 'off', 'Position Manager');
+      const pmMeta = document.getElementById('meta-posmanager');
+      if (pmMeta) pmMeta.textContent = fmtMeta(
+        pm.mem_mb != null ? Math.round(pm.mem_mb) : null,
+        pm.uptime_s != null ? Math.round(pm.uptime_s) : null
       );
 
       // ---------- TOP BANNER ----------
@@ -328,6 +341,7 @@
       if ($emit){  kv($emit, [['PID','—'],['CPU (s)','—'],['Mem (MB)','—'],['Log age (min)','—'],['Uptime','—']]); }
       if ($gov){   kv($gov,  [['PID','—'],['Uptime','—']]); }
       if ($prom){  kv($prom, [['PID','—'],['Uptime','—']]); }
+      if ($pm){    kv($pm,   [['PID','—'],['Uptime','—']]); }
 
       setLight(document.getElementById('light-bridge'),'off');
       setLight(document.getElementById('light-exec'),'off');
@@ -336,9 +350,11 @@
       setLight(document.getElementById('light-emitter'),'off');
       setLight(document.getElementById('light-governor'),'off');
       setLight(document.getElementById('light-promoter'),'off');
-      ['meta-bridge','meta-exec','meta-retrain','meta-watcher','meta-emitter'].forEach(id=>{
-        const el=document.getElementById(id); if(el) el.textContent='';
-      });
+      setLight(document.getElementById('light-posmanager'),'off');
+      ['meta-bridge','meta-exec','meta-retrain','meta-watcher','meta-emitter','meta-governor','meta-promoter','meta-posmanager']
+        .forEach(id=>{
+          const el=document.getElementById(id); if(el) el.textContent='';
+        });
     }
   }
 
@@ -387,7 +403,7 @@
                 method:'POST',
                 body: JSON.stringify({config: btn.dataset.cfg})
               });
-              appendOut(JSON.stringify(j, null, 2));
+              appendOut(JSON.stringify(j,null,2));
               await refreshAll();
             }catch(e){ appendOut('erro: '+e); }
           });
@@ -418,34 +434,33 @@
   }
 
   async function loadPortfolioBox(){
-  const box = document.getElementById('portfolioBox');
-  if (!box) return;
-  try {
-    const data = await api('/portfolio');
-    const items = Array.isArray(data?.items) ? data.items : (data?.selection?.items || []);
-    if (!items || !items.length){
-      box.innerHTML = '<div class="muted">Sem seleção no momento.</div>';
-      return;
+    const box = document.getElementById('portfolioBox');
+    if (!box) return;
+    try {
+      const data = await api('/portfolio');
+      const items = Array.isArray(data?.items) ? data.items : (data?.selection?.items || []);
+      if (!items || !items.length){
+        box.innerHTML = '<div class="muted">Sem seleção no momento.</div>';
+        return;
+      }
+      let html = '<table><thead><tr><th>#</th><th>Symbol</th><th>TF</th><th>PF</th><th>Trades</th><th>Sharpe</th><th>maxDD</th></tr></thead><tbody>';
+      items.forEach((it, i)=>{
+        html += `<tr>
+          <td>${i+1}</td>
+          <td>${it.symbol||'-'}</td>
+          <td><span class="tag">${it.timeframe||'-'}</span></td>
+          <td>${fmtNumSafe(it.pf)}</td>
+          <td>${fmtNumSafe(it.trades)}</td>
+          <td>${fmtNumSafe(it.sharpe)}</td>
+          <td>${fmtNumSafe(it.max_dd)}</td>
+        </tr>`;
+      });
+      html += '</tbody></table>';
+      box.innerHTML = html;
+    } catch(e){
+      box.innerHTML = '<div class="muted">Erro a ler portfolio: '+e+'</div>';
     }
-    // tabela compacta
-    let html = '<table><thead><tr><th>#</th><th>Symbol</th><th>TF</th><th>PF</th><th>Trades</th><th>Sharpe</th><th>maxDD</th></tr></thead><tbody>';
-    items.forEach((it, i)=>{
-      html += `<tr>
-        <td>${i+1}</td>
-        <td>${it.symbol||'-'}</td>
-        <td><span class="tag">${it.timeframe||'-'}</span></td>
-        <td>${fmtNum(it.pf)}</td>
-        <td>${fmtNum(it.trades)}</td>
-        <td>${fmtNum(it.sharpe)}</td>
-        <td>${fmtNum(it.max_dd)}</td>
-      </tr>`;
-    });
-    html += '</tbody></table>';
-    box.innerHTML = html;
-  } catch(e){
-    box.innerHTML = '<div class="muted">Erro a ler portfolio: '+e+'</div>';
   }
-}
 
   // --------------------------------------------------
   // Refresh logic + spinner visual
@@ -480,7 +495,7 @@
   }
 
   // --------------------------------------------------
-  // Botões principais
+  // Botões principais (dashboard)
   // --------------------------------------------------
   $refreshBtn?.addEventListener('click', refreshAll);
 
@@ -540,9 +555,10 @@
   await refreshAll();
   startAutoRefresh(true);
 
-  // ====== LOG VIEWER (inclui watcher/emitter; extensível para gov/prom) ======
+  // ====== LOG VIEWER ======
   (function(){
-    const logsCard = document.querySelector('#strategies')?.closest('.card')?.nextElementSibling;
+    const logsCard = document.querySelector('#strategies')?.closest('.card')?.nextElementSibling?.nextElementSibling;
+    // (Jobs card -> Portfolio card -> Logs card)  => logsCard = Logs
     const logArea = document.getElementById('out');
     if (!logsCard || !logArea) return;
 
@@ -578,13 +594,13 @@
           sel.appendChild(o);
         });
         if (!sel.value){
-          ['executor.log','scheduler_retrain.log','retrain.log','watch_signals.log','emitter.log','governor.log','promoter.log']
+          ['executor.log','scheduler_retrain.log','retrain.log','watch_signals.log','emitter.log','governor.log','promoter.log','position_manager.log']
             .forEach(n=>{
               const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
             });
         }
       }catch(e){
-        ['executor.log','scheduler_retrain.log','retrain.log','watch_signals.log','emitter.log','governor.log','promoter.log']
+        ['executor.log','scheduler_retrain.log','retrain.log','watch_signals.log','emitter.log','governor.log','promoter.log','position_manager.log']
           .forEach(n=>{
             const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
           });

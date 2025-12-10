@@ -72,8 +72,11 @@ def _cmd_for(target: str, action: str, *, visible: bool) -> tuple[list[str] | st
     tgt = (target or "").strip().lower()
     act = (action or "").strip().lower()
 
-    # ⬇️ acrescenta governor e promoter
-    valid = {"all","bridge","executor","retrain","scheduler","watcher","emitter","governor","promoter"}
+    # acrescenta position_manager
+    valid = {
+        "all","bridge","executor","retrain","scheduler",
+        "watcher","emitter","governor","promoter","position_manager"
+    }
     if tgt not in valid:
         raise HTTPException(status_code=400, detail=f"target inválido: {target}")
     if act not in ("start", "stop", "restart"):

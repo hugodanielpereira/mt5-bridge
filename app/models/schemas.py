@@ -4,7 +4,7 @@ from typing import Optional, List, Literal, Dict, Any
 from pydantic import BaseModel, Field
 
 # Úteis para validação de inputs onde fizer sentido
-Timeframe = Literal["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+Timeframe = Literal["M1", "M5", "M15", "M30", "H1", "H2", "H3", "H4", "H6", "H12", "D1"]
 
 class Ping(BaseModel):
     ok: bool

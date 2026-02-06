@@ -1,68 +1,92 @@
 # app/services/mt5/history.py
 from __future__ import annotations
-from typing import Any, Dict, List
-import pandas as pd
-import MetaTrader5 as MT5
-from .session import MT5Session
-from .utils import nt_to_dict
+
+import os
+from datetime import datetime, timezone, timedelta
+from typing import Any
+
+
+def _mt5_mode() -> str:
+    return (os.getenv("MT5_MODE", "webrequest") or "webrequest").strip().lower()
+
+
+def _is_webrequest_mode() -> bool:
+    return _mt5_mode() in ("webrequest", "http", "ea", "bridge")
+
+
+def _is_native_mode() -> bool:
+    return _mt5_mode() in ("native", "mt5", "metatrader5")
+
 
 class History:
-    def __init__(self, session: MT5Session) -> None:
-        self.s = session
+    """
+    History facade.
 
-    def history_deals_get(self, frm, to):
-        self.s.ensure_up()
-        deals = MT5.history_deals_get(frm, to)
-        return deals or []
+    - MT5_MODE=webrequest (default): NOT supported here (bridge is EA->HTTP first).
+    - MT5_MODE=native: uses MetaTrader5 Python API (legacy).
+    """
 
-    def orders_recent(self, days: int = 1) -> List[Dict[str, Any]]:
-        self.s.ensure_up()
-        end = pd.Timestamp.utcnow().to_pydatetime()
-        start = (pd.Timestamp.utcnow() - pd.Timedelta(days=days)).to_pydatetime()
-        orders = MT5.history_orders_get(start, end) or []
-        out: List[Dict[str, Any]] = []
-        for o in orders:
-            dd = nt_to_dict(o)
-            for k in ("time_setup", "time_done"):
-                v = dd.get(k)
-                if isinstance(v, (int, float)):
-                    dd[k] = pd.to_datetime(v, unit="s", utc=True).isoformat()
-            out.append({
-                "time_setup": dd.get("time_setup"),
-                "time_done": dd.get("time_done"),
-                "symbol": dd.get("symbol"),
-                "type": dd.get("type"),
-                "price_open": dd.get("price_open"),
-                "volume_initial": dd.get("volume_initial"),
-                "volume_current": dd.get("volume_current"),
-                "magic": dd.get("magic"),
-                "comment": dd.get("comment"),
-                "order": dd.get("order"),
-            })
-        return sorted(out, key=lambda x: (x["time_done"] or x["time_setup"] or ""))
+    def __init__(self, session: Any):
+        self.session = session
+        self._mt5_mod = None  # lazy native-only
 
-    def deals_recent(self, days: int = 1) -> List[Dict[str, Any]]:
-        self.s.ensure_up()
-        end = pd.Timestamp.utcnow().to_pydatetime()
-        start = (pd.Timestamp.utcnow() - pd.Timedelta(days=days)).to_pydatetime()
-        deals = MT5.history_deals_get(start, end) or []
-        out: List[Dict[str, Any]] = []
-        for d in deals:
-            dd = nt_to_dict(d)
-            t = dd.get("time")
-            if isinstance(t, (int, float)):
-                t = pd.to_datetime(t, unit="s", utc=True).isoformat()
-            out.append({
-                "time": t,
-                "symbol": dd.get("symbol"),
-                "type": dd.get("type"),
-                "entry": dd.get("entry"),
-                "volume": dd.get("volume"),
-                "price": dd.get("price"),
-                "profit": dd.get("profit"),
-                "magic": dd.get("magic"),
-                "comment": dd.get("comment"),
-                "order": dd.get("order"),
-                "deal": dd.get("deal"),
-            })
-        return sorted(out, key=lambda x: x["time"] or "")
+    # ----------------------------------------------------------------------
+    # Native loader (legado) - só quando MT5_MODE=native
+    # ----------------------------------------------------------------------
+    def _mt5(self):
+        if self._mt5_mod is not None:
+            return self._mt5_mod
+        try:
+            import MetaTrader5 as MT5  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                f"MetaTrader5 import failed (MT5_MODE=native). "
+                f"Install it in the python env being used, or switch MT5_MODE=webrequest. "
+                f"err={e!r}"
+            )
+        self._mt5_mod = MT5
+        return MT5
+
+    def _require_native(self, what: str) -> None:
+        mode = _mt5_mode()
+        if _is_webrequest_mode():
+            raise RuntimeError(
+                f"{what} not supported in MT5_MODE={mode}. "
+                f"Bridge is WebRequest-first (EA talks to bridge). "
+                f"Set MT5_MODE=native to use MetaTrader5 Python API."
+            )
+        # se alguém meter lixo tipo MT5_MODE=foo, também bloqueia (fail-fast)
+        if not _is_native_mode():
+            raise RuntimeError(
+                f"{what} requires MT5_MODE=native (got MT5_MODE={mode!r})."
+            )
+
+    # ----------------------------------------------------------------------
+    # API
+    # ----------------------------------------------------------------------
+    def history_deals_get(self, frm: datetime, to: datetime) -> Any:
+        self._require_native("history_deals_get")
+        MT5 = self._mt5()
+
+        if hasattr(self.session, "ensure_up"):
+            self.session.ensure_up()
+
+        return MT5.history_deals_get(frm, to)
+
+    def deals_recent(self, days: int = 1) -> Any:
+        self._require_native("deals_recent")
+        end = datetime.now(tz=timezone.utc)
+        start = end - timedelta(days=int(days))
+        return self.history_deals_get(start, end)
+
+    def orders_recent(self, days: int = 1) -> Any:
+        self._require_native("orders_recent")
+        MT5 = self._mt5()
+
+        end = datetime.now(tz=timezone.utc)
+        start = end - timedelta(days=int(days))
+
+        if hasattr(self.session, "ensure_up"):
+            self.session.ensure_up()
+
+        return MT5.history_orders_get(start, end)

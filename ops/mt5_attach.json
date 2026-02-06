@@ -1,0 +1,17 @@
+{
+  "ts": "2026-02-06T10:11:58.649010+00:00",
+  "service": "bridge_backend",
+  "mode": "webrequest",
+  "iid": "DEV35",
+  "ok": true,
+  "mt5": {
+    "running": null,
+    "portable": false,
+    "exe_path": "terminal64.exe",
+    "exe_args": "",
+    "login": null,
+    "server": null,
+    "terminal_info": null,
+    "last_error": null
+  }
+}

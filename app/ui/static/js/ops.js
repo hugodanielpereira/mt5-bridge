@@ -1,7 +1,9 @@
-//#bridges\mt5-bridge\app\ui\static\js\ops.js
+// app/ui/static/js/ops.js
 async function opsRun(action){
-  const tgt = document.getElementById('opsTarget').value;
+  const tgt = document.getElementById('opsTarget')?.value || 'all';
   const out = document.getElementById('opsOut');
+  if (!out) return;
+
   out.value += `> ${tgt} ${action}\n`;
   try{
     const j = await api('/proc_run', {
@@ -10,25 +12,38 @@ async function opsRun(action){
     });
     out.value += JSON.stringify(j,null,2) + "\n";
   }catch(e){
-    out.value += 'erro: '+e+"\n";
+    out.value += 'erro: ' + (e?.message || e) + "\n";
   }
   out.scrollTop = out.scrollHeight;
 }
 
 async function opsStatus(){
   const out = document.getElementById('opsOut');
+  if (!out) return;
+
+  // 1) tenta pela API (na base /ui/api)
   try{
-    // usar fallback absoluto para /health (fora do prefixo), se precisares:
-    const health = await api('/health');  // se no backend expões /ui/api/health
-    out.value += JSON.stringify(health, null, 2) + "\n";
+    const st = await api('/status');
+    out.value += JSON.stringify(st, null, 2) + "\n";
+    out.scrollTop = out.scrollHeight;
+    return;
+  }catch(_){}
+
+  // 2) fallback /health via api helper (se existir endpoint)
+  try{
+    const health = await api('/health');
+    out.value += (typeof health === 'string' ? health : JSON.stringify(health, null, 2)) + "\n";
+    out.scrollTop = out.scrollHeight;
+    return;
+  }catch(_){}
+
+  // 3) fallback absoluto ao root do backend
+  try{
+    const r = await fetch((window.API_ORIGIN||'') + '/health');
+    const txt = await r.text();
+    out.value += txt + "\n";
   }catch(e){
-    // fallback absoluto ao root /health
-    try{
-      const r = await fetch((window.API_ORIGIN||'') + '/health');
-      out.value += (await r.text())+"\n";
-    }catch(e2){
-      out.value += 'erro: '+e2+"\n";
-    }
+    out.value += 'erro: ' + (e?.message || e) + "\n";
   }
   out.scrollTop = out.scrollHeight;
 }

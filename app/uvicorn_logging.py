@@ -1,6 +1,4 @@
-# bridges\mt5-bridge\app\uvicorn_logging.py
-import logging
-
+# app/uvicorn_logging.py
 LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,
@@ -9,16 +7,13 @@ LOGGING_CONFIG = {
         "access":  {"format": "%(asctime)s | %(levelname)s | %(name)s | %(client_addr)s - '%(request_line)s' %(status_code)s"},
     },
     "handlers": {
-        # não abrimos ficheiros aqui—delegamos aos handlers criados por setup_logging("uvicorn")
-        "uvicorn_stream": {
-            "class": "logging.StreamHandler",
-            "formatter": "default",
-        },
+        "uvicorn_stream": {"class": "logging.StreamHandler", "formatter": "default"},
+        "uvicorn_access": {"class": "logging.StreamHandler", "formatter": "access"},
     },
     "loggers": {
-        # estes nomes são os que o uvicorn usa internamente
-        "uvicorn":        {"handlers": ["uvicorn_stream"], "level": "INFO", "propagate": True},
-        "uvicorn.error":  {"handlers": ["uvicorn_stream"], "level": "INFO", "propagate": True},
-        "uvicorn.access": {"handlers": ["uvicorn_stream"], "level": "INFO", "propagate": True},
+        # manter apenas uvicorn em stream; o resto do teu app vai para o root handlers do main.py
+        "uvicorn":        {"handlers": ["uvicorn_stream"], "level": "INFO", "propagate": False},
+        "uvicorn.error":  {"handlers": ["uvicorn_stream"], "level": "INFO", "propagate": False},
+        "uvicorn.access": {"handlers": ["uvicorn_access"], "level": "INFO", "propagate": False},
     },
 }

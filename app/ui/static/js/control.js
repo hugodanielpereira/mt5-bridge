@@ -1,14 +1,14 @@
 // app/ui/static/js/control.js
 (async function () {
-  const $key = document.querySelector("#api-key");
+  const $key  = document.querySelector("#api-key");
   const $save = document.querySelector("#save-key");
-  const $out = document.querySelector("#ops-output");
+  const $out  = document.querySelector("#ops-output");
 
   // carregar / guardar API key
   if ($key && $save && $out) {
     $key.value = localStorage.getItem("X_API_KEY") || "";
     $save.addEventListener("click", () => {
-      localStorage.setItem("X_API_KEY", $key.value.trim());
+      localStorage.setItem("X_API_KEY", ($key.value || "").trim());
       $out.value += "✓ API key guardada.\n";
       $out.scrollTop = $out.scrollHeight;
     });
@@ -16,46 +16,52 @@
 
   async function call(target, action, visible=false) {
     if (!$out) return;
-    $out.value += `\n> ${target} ${action}${visible?" (visível)":" (captura)"}…\n`;
-    $out.scrollTop = $out.scrollHeight;
-    const body = { target, action, visible };
 
+    $out.value += `\n> ${target} ${action}${visible ? " (visível)" : " (captura)"}…\n`;
+    $out.scrollTop = $out.scrollHeight;
+
+    const body = { target, action, visible };
+    const apiKey = (localStorage.getItem("X_API_KEY") || "").trim();
+
+    // tenta endpoint "ops" (preferido)
     try {
       const absUrl = (window.API_ORIGIN || '') + '/ui/ops/run';
       const resp = await fetch(absUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-API-Key": (localStorage.getItem("X_API_KEY") || "").trim(),
+          "X-API-Key": apiKey,
         },
         body: JSON.stringify(body),
       });
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       var data = await resp.json();
     } catch (e) {
+      // fallback pela api() helper (respeita API_BASE)
       try {
         var data = await api('/ops/run', {
           method: 'POST',
-          headers: { "X-API-Key": (localStorage.getItem("X_API_KEY") || "").trim() },
+          headers: { "X-API-Key": apiKey },
           body: JSON.stringify(body)
         });
       } catch(e2){
-        $out.value += `✗ Falha: ${e2}\n`;
+        $out.value += `✗ Falha: ${e2?.message || e2}\n`;
+        $out.scrollTop = $out.scrollHeight;
         return;
       }
     }
 
-    const rc = (typeof data.rc === "number") ? data.rc : NaN;
-    $out.value += `cmd: ${data.cmd || "(desconhecido)"}\n`;
-    $out.value += `cwd: ${data.cwd || "(n/a)"}\n`;
+    const rc = (typeof data?.rc === "number") ? data.rc : NaN;
+    $out.value += `cmd: ${data?.cmd || "(desconhecido)"}\n`;
+    $out.value += `cwd: ${data?.cwd || "(n/a)"}\n`;
     $out.value += `rc: ${Number.isNaN(rc) ? "(sem rc)" : rc}\n`;
-    if (data.stdout) $out.value += `stdout:\n${data.stdout}\n`;
-    if (data.stderr) $out.value += `stderr:\n${data.stderr}\n`;
-    $out.value += data.ok ? "✓ OK\n" : "✗ FALHA\n";
+    if (data?.stdout) $out.value += `stdout:\n${data.stdout}\n`;
+    if (data?.stderr) $out.value += `stderr:\n${data.stderr}\n`;
+    $out.value += data?.ok ? "✓ OK\n" : "✗ FALHA\n";
     $out.scrollTop = $out.scrollHeight;
   }
 
-  // wiring de todos os botões
+  // wiring de botões existentes no HTML (sem governor/promoter)
   const wiring = [
     // bridge
     ["bridge","start"],["bridge","stop"],["bridge","restart"],
@@ -72,12 +78,6 @@
     // emitter
     ["emitter","start"],["emitter","stop"],["emitter","restart"],
     ["emitter","start","vis"],["emitter","restart","vis"],
-    // governor
-    ["governor","start"],["governor","stop"],["governor","restart"],
-    ["governor","start","vis"],["governor","restart","vis"],
-    // promoter
-    ["promoter","start"],["promoter","stop"],["promoter","restart"],
-    ["promoter","start","vis"],["promoter","restart","vis"],
     // position_manager
     ["position_manager","start"],["position_manager","stop"],["position_manager","restart"],
     ["position_manager","start","vis"],["position_manager","restart","vis"],

@@ -1,56 +1,210 @@
 # app/controllers/trade_controller.py
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Any, Tuple, Dict
 import os
-
-from fastapi import APIRouter, Header, Query, Depends, HTTPException
 import traceback
-import MetaTrader5 as mt5
+import time
 
-from app.shareweb import require_api_key
+from fastapi import APIRouter, Query, Depends, HTTPException
+
+from app.common.auth import require_api_key
 from app.services.mt5 import MT5Service
-from app.models.market_order import MarketOrder  # se ainda usares noutros sítios
+from app.services.mt5.state_store import STORE
+from app.services.mt5.command_store import CommandStore
+from app.services.events.publisher import EventsPublisher
 
 router = APIRouter(tags=["trade"])
 
-# Light auth (same pattern as other controllers)
-def _require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
-    expected = os.getenv("X_API_KEY") or os.getenv("BRIDGE_API_KEY") or os.getenv("API_KEY")
-    if expected and (not x_api_key or x_api_key != expected):
-        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+COMMANDS = CommandStore.from_env()
+PUBLISHER = EventsPublisher()
+
+
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _default_scope() -> str:
+    return (
+        (os.getenv("IID") or "").strip()
+        or (os.getenv("INSTANCE_ID") or "").strip()
+        or (os.getenv("BRIDGE_ID") or "").strip()
+        or "default"
+    )
+
+
+def _norm_scope(scope: Optional[str]) -> str:
+    sc = (scope or "").strip()
+    return sc or _default_scope()
+
+
+
+def _is_webrequest_mode(svc: MT5Service | None = None) -> bool:
+    try:
+        if svc is not None and hasattr(svc, "webrequest_mode"):
+            return bool(getattr(svc, "webrequest_mode"))
+    except Exception:
+        pass
+    mode = (os.getenv("MT5_MODE", "webrequest") or "webrequest").strip().lower()
+    return mode in ("webrequest", "http", "ea", "bridge")
+
+
+def _native_last_error() -> Optional[Tuple[Any, Any]]:
+    try:
+        mode = (os.getenv("MT5_MODE", "webrequest") or "webrequest").strip().lower()
+        if mode in ("webrequest", "http", "ea", "bridge"):
+            return None
+        import MetaTrader5 as mt5  # type: ignore
+        code, msg = mt5.last_error()
+        return (code, msg)
+    except Exception:
+        return None
+
+
+def _ea_meta() -> Dict[str, Any]:
+    st = STORE.snapshot()
+    ttl = int(os.getenv("EA_TTL_MS", "5000"))
+    return {
+        "ea_connected": st.is_ea_connected(ttl_ms=ttl),
+        "last_heartbeat_ms": st.last_heartbeat_ms,
+        "bridge_instance_id": getattr(st, "bridge_instance_id", None),
+    }
+
+
+def _badreq(msg: str) -> HTTPException:
+    return HTTPException(status_code=400, detail=msg)
+
+
+def _require_fields(payload: dict, fields: list[str]) -> None:
+    for f in fields:
+        if payload.get(f, None) is None:
+            raise _badreq(f"missing field '{f}'")
+
+
+def _norm_side(v: Any) -> str:
+    s = str(v or "").strip().upper()
+    if s in ("BUY", "LONG"):
+        return "BUY"
+    if s in ("SELL", "SHORT"):
+        return "SELL"
+    raise _badreq("field 'side' must be BUY/SELL")
+
+
+def _norm_symbol(v: Any) -> str:
+    s = str(v or "").strip().upper()
+    if not s:
+        raise _badreq("field 'symbol' is required")
+    return s
+
+
+def _norm_float(v: Any, field: str) -> float:
+    try:
+        return float(v)
+    except Exception:
+        raise _badreq(f"field '{field}' must be a number")
+
+
+def _norm_int(v: Any, field: str) -> int:
+    try:
+        return int(v)
+    except Exception:
+        raise _badreq(f"field '{field}' must be int")
+
+
+def _enqueue_cmd(cmd: Dict[str, Any], *, scope: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Enfileira no Redis (CommandStore) e devolve cmd_id imediatamente.
+    """
+    sc = _norm_scope(scope)
+
+    c = dict(cmd or {})
+    c.setdefault("scope", sc)
+    c.setdefault("ts_ms", _now_ms())
+
+    meta = COMMANDS.enqueue(c, scope=str(c.get("scope") or sc))
+
+    # --- publish stream event (best-effort) ---
+    try:
+        iid = (os.getenv("IID") or os.getenv("BRIDGE_ID") or "unknown").strip()
+        PUBLISHER.publish(
+            iid=iid,
+            scope=str(c.get("scope") or sc),
+            event_type="cmd.queued",
+            payload={
+                "id": meta.id,
+                "type": meta.type,
+                "status": meta.status,
+                "scope": meta.scope,
+                "ts_ms": meta.ts_ms,
+                "cmd": c,
+            },
+        )
+    except Exception:
+        pass
+
+    out: Dict[str, Any] = {
+        "ok": True,
+        "mode": "webrequest",
+        "queued": True,
+        "cmd_id": meta.id,
+        "cmd_meta": {
+            "id": meta.id,
+            "type": meta.type,
+            "status": meta.status,
+            "ts_ms": meta.ts_ms,
+            "scope": meta.scope,
+        },
+        "cmd": c,
+        **_ea_meta(),
+    }
+    if not out["ea_connected"]:
+        out["warning"] = "ea_not_connected_yet (command queued anyway)"
+    return out
 
 
 # ====================== ACCOUNT / INFO ======================
 
 @router.get("/account")
 @router.get("/account_info")
-def account_info(_: None = Depends(_require_api_key)):
-    """
-    Devolve info da conta atual (saldo, equity, margem, etc.)
-    """
+def account_info(_: None = Depends(require_api_key)):
     svc = MT5Service()
+
+    if _is_webrequest_mode(svc):
+        st = STORE.snapshot()
+        return {
+            "ok": True,
+            "mode": "webrequest",
+            "ea_connected": st.is_ea_connected(ttl_ms=int(os.getenv("EA_TTL_MS", "5000"))),
+            "last_heartbeat_ms": st.last_heartbeat_ms,
+            **(st.account or {}),
+        }
+
     svc.ensure_up()
-    try:
-        return svc.account_info()
-    except Exception as e:
-        code, msg = mt5.last_error()
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "account_info failed",
-                "exc": str(e),
-                "last_error": [code, msg],
-            },
-        )
+    return svc.account_info()
 
 
 # ====================== POSITIONS ===========================
 
 @router.get("/positions")
-def positions(symbol: Optional[str] = Query(None), x_api_key: Optional[str] = Header(None)):
-    require_api_key(x_api_key)
+def positions(symbol: Optional[str] = Query(None), _: None = Depends(require_api_key)):
     svc = MT5Service()
+
+    if _is_webrequest_mode(svc):
+        st = STORE.snapshot()
+        items = st.positions or []
+        if symbol:
+            sym = symbol.upper().strip()
+            items = [p for p in items if str(p.get("symbol", "")).upper() == sym]
+        return {
+            "ok": True,
+            "mode": "webrequest",
+            "positions": items,
+            **_ea_meta(),
+        }
+
     svc.ensure_up()
     return svc.positions(symbol)
 
@@ -58,209 +212,318 @@ def positions(symbol: Optional[str] = Query(None), x_api_key: Optional[str] = He
 # ====================== MARKET ORDERS =======================
 
 @router.post("/order_market")
-def order_market(payload: dict, _: None = Depends(_require_api_key)):
-    """
-    Abre ordem de mercado (BUY/SELL) usando MT5Service.order_market
-    Payload típico:
-      {
-        "symbol": "EURUSD",
-        "side": "BUY",
-        "volume": 0.01,
-        "sl": 1.0800,
-        "tp": 1.0900,
-        "comment": "mlsl-exec"
-      }
-    """
+def order_market(payload: dict, _: None = Depends(require_api_key)):
+    svc = MT5Service()
+
+    if _is_webrequest_mode(svc):
+        _require_fields(payload, ["symbol", "side", "volume"])
+
+        sym = _norm_symbol(payload.get("symbol"))
+        side = _norm_side(payload.get("side"))
+        vol = _norm_float(payload.get("volume"), "volume")
+        if vol <= 0:
+            raise _badreq("field 'volume' must be > 0")
+
+        sl = payload.get("sl", None)
+        tp = payload.get("tp", None)
+        sl_f = None if sl is None else _norm_float(sl, "sl")
+        tp_f = None if tp is None else _norm_float(tp, "tp")
+
+        cmd: Dict[str, Any] = {
+            "type": "order_market",
+            "symbol": sym,
+            "side": side,
+            "volume": vol,
+        }
+        if sl_f is not None:
+            cmd["sl"] = sl_f
+        if tp_f is not None:
+            cmd["tp"] = tp_f
+
+        for k in ("magic", "comment", "deviation", "filling", "time_type", "scope"):
+            if payload.get(k) is not None:
+                cmd[k] = payload.get(k)
+
+        return _enqueue_cmd(cmd, scope=str(cmd.get("scope") or _default_scope()))
+
+    # native
     try:
-        svc = MT5Service()
-        res = svc.order_market(payload)
-        return res
+        svc.ensure_up()
+        return svc.order_market(payload)
     except HTTPException:
-        # re-raise clean 4xx com detail preparado pelo service
         raise
     except Exception as e:
-        code, msg = mt5.last_error()
+        le = _native_last_error()
         raise HTTPException(
-            status_code=400,
+            status_code=500,
             detail={
                 "error": "order_market crashed",
                 "exc": str(e),
-                "last_error": [code, msg],
-                "trace": traceback.format_exc().splitlines()[-8:],  # tail
+                "last_error": list(le) if le else None,
+                "trace": traceback.format_exc().splitlines()[-12:],
             },
         )
 
 
-# ====================== MODIFY / CLOSE ======================
-
 @router.post("/order_modify")
-def order_modify(payload: dict, _: None = Depends(_require_api_key)):
-    """
-    Modifica SL/TP de uma posição aberta (por ticket).
-    Payload:
-      {
-        "ticket": 12345678,
-        "sl": 1.0800,   # opcional
-        "tp": 1.0900    # opcional
-      }
-    """
-    ticket = payload.get("ticket")
+def order_modify(payload: dict, _: None = Depends(require_api_key)):
+    svc = MT5Service()
+
+    ticket = payload.get("ticket", None)
     if ticket is None:
-        raise HTTPException(status_code=400, detail="field 'ticket' is required")
+        ticket = payload.get("position", None)
+    if ticket is None:
+        raise _badreq("field 'ticket' is required (or 'position' alias)")
 
+    ticket_i = _norm_int(ticket, "ticket")
+    sl = payload.get("sl", None)
+    tp = payload.get("tp", None)
+    if sl is None and tp is None:
+        raise _badreq("at least one of 'sl' or 'tp' must be provided")
+
+    if _is_webrequest_mode(svc):
+        cmd: Dict[str, Any] = {"type": "order_modify", "ticket": ticket_i}
+
+        if sl is not None:
+            cmd["sl"] = _norm_float(sl, "sl")
+        if tp is not None:
+            cmd["tp"] = _norm_float(tp, "tp")
+
+        for k in ("symbol", "comment", "magic", "scope"):
+            if payload.get(k) is not None:
+                cmd[k] = payload.get(k)
+
+        return _enqueue_cmd(cmd, scope=str(cmd.get("scope") or _default_scope()))
+
+    # native
     try:
-        # permitir ticket como string ou int
-        ticket_i = int(ticket)
-    except Exception:
-        raise HTTPException(status_code=400, detail="field 'ticket' must be int")
-
-    sl = payload.get("sl")
-    tp = payload.get("tp")
-
-    # deixar None passar para “mantém valor actual”
-    try:
-        svc = MT5Service()
         svc.ensure_up()
-        res = svc.modify_position(ticket=ticket_i, sl=sl, tp=tp)
-        return res
+        return svc.modify_position(ticket=ticket_i, sl=sl, tp=tp)
     except HTTPException:
         raise
     except Exception as e:
-        code, msg = mt5.last_error()
+        le = _native_last_error()
         raise HTTPException(
-            status_code=400,
+            status_code=500,
             detail={
                 "error": "order_modify crashed",
                 "exc": str(e),
-                "last_error": [code, msg],
-                "trace": traceback.format_exc().splitlines()[-8:],
+                "last_error": list(le) if le else None,
+                "trace": traceback.format_exc().splitlines()[-12:],
             },
         )
 
 
 @router.post("/order_close")
-def order_close(payload: dict, _: None = Depends(_require_api_key)):
-    """
-    Fecha uma posição pelo ticket.
+def order_close(payload: dict, _: None = Depends(require_api_key)):
+    svc = MT5Service()
 
-    Suporta fecho total ou parcial:
-      {
-        "ticket": 12345678,
-        "volume": 0.02,        # opcional; se omitido ou >= volume da posição → fecha tudo
-        "symbol": "EURUSD",    # opcional (ignorado aqui, usado só para logging no caller)
-        "side": "BUY"          # opcional (ignorado aqui)
-      }
-
-    É o endpoint que o PositionManager deve usar.
-    """
-    ticket = payload.get("ticket")
+    ticket = payload.get("ticket", None)
     if ticket is None:
-        raise HTTPException(status_code=400, detail="field 'ticket' is required")
+        raise _badreq("field 'ticket' is required")
+    ticket_i = _norm_int(ticket, "ticket")
 
+    volume = payload.get("volume", None)
+    volume_f: Optional[float] = None
+    if volume is not None:
+        volume_f = _norm_float(volume, "volume")
+        if volume_f <= 0:
+            raise _badreq("field 'volume' must be > 0 if provided")
+
+    if _is_webrequest_mode(svc):
+        cmd: Dict[str, Any] = {"type": "order_close", "ticket": ticket_i}
+        if volume_f is not None:
+            cmd["volume"] = volume_f
+
+        for k in ("symbol", "comment", "magic", "scope"):
+            if payload.get(k) is not None:
+                cmd[k] = payload.get(k)
+
+        return _enqueue_cmd(cmd, scope=str(cmd.get("scope") or _default_scope()))
+
+    # native
     try:
-        ticket_i = int(ticket)
-    except Exception:
-        raise HTTPException(status_code=400, detail="field 'ticket' must be int")
-
-    volume = payload.get("volume")
-
-    # volume pode ser None → fecho total; se vier, tem de ser float válido
-    volume_f: Optional[float]
-    if volume is None:
-        volume_f = None
-    else:
-        try:
-            volume_f = float(volume)
-        except Exception:
-            raise HTTPException(status_code=400, detail="field 'volume' must be float if provided")
-
-    try:
-        svc = MT5Service()
         svc.ensure_up()
         return svc.close_ticket(ticket_i, volume_f)
     except HTTPException:
         raise
     except Exception as e:
-        code, msg = mt5.last_error()
+        le = _native_last_error()
         raise HTTPException(
-            status_code=400,
+            status_code=500,
             detail={
                 "error": "order_close crashed",
                 "exc": str(e),
-                "last_error": [code, msg],
-                "trace": traceback.format_exc().splitlines()[-8:],
+                "last_error": list(le) if le else None,
+                "trace": traceback.format_exc().splitlines()[-12:],
             },
         )
 
 
+# ====================== COMPAT (LEGACY) =====================
+
 @router.post("/close_symbol")
-def close_symbol(symbol: str, x_api_key: Optional[str] = Header(None)):
-    """
-    Fecha todas as posições de um símbolo (mantido para compatibilidade).
-    """
-    require_api_key(x_api_key)
+def close_symbol(symbol: str, _: None = Depends(require_api_key)):
     svc = MT5Service()
+
+    if _is_webrequest_mode(svc):
+        sym = _norm_symbol(symbol)
+        return _enqueue_cmd({"type": "close_symbol", "symbol": sym})
+
     svc.ensure_up()
     return svc.close_symbol(symbol)
 
 
 @router.post("/close_ticket")
-def close_ticket(ticket: int, x_api_key: Optional[str] = Header(None)):
-    """
-    Fecha uma posição por ticket (mantido para compatibilidade).
-
-    Aqui é sempre fecho total; para fecho parcial usa /order_close.
-    """
-    require_api_key(x_api_key)
+def close_ticket(ticket: int, _: None = Depends(require_api_key)):
     svc = MT5Service()
+
+    if _is_webrequest_mode(svc):
+        return _enqueue_cmd({"type": "close_ticket", "ticket": int(ticket)})
+
     svc.ensure_up()
     return svc.close_ticket(ticket)
-
-
-# ====================== OHLCV / MARKET DATA =================
-
-@router.get("/ohlcv")
-def ohlcv(
-    symbol: str = Query(..., description="símbolo pedido (ex.: EURUSD, XAUUSD, BTCUSD)"),
-    tf: str = Query("H1", description="timeframe MT5 (M1,M5,M15,M30,H1,H4,D1,...)"),
-    start: Optional[str] = Query(
-        default=None,
-        description="início (ISO-8601 UTC, ex.: 2025-01-01T00:00:00Z). Se usado, precisa também de 'end'.",
-    ),
-    end: Optional[str] = Query(
-        default=None,
-        description="fim (ISO-8601 UTC). Se usado, precisa também de 'start'.",
-    ),
-    limit: int = Query(1000, ge=1, le=5000),
-    _: None = Depends(_require_api_key),
-):
-    """
-    OHLCV direto do MT5, resolvendo sufixos / aliases via MarketData.
-    Se 'start' e 'end' forem fornecidos → usa copy_rates_range.
-    Caso contrário → copy_rates_from_pos com 'limit' barras.
-    """
-    svc = MT5Service()
-    svc.ensure_up()
-    try:
-        data = svc.ohlcv(symbol=symbol, tf=tf, start=start, end=end, limit=limit)
-        return data
-    except Exception as e:
-        code, msg = mt5.last_error()
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "ohlcv failed",
-                "exc": str(e),
-                "last_error": [code, msg],
-            },
-        )
 
 
 # ====================== DEALS RECENT ========================
 
 @router.get("/deals_recent")
-def deals_recent(days: int = Query(1, ge=0, le=30), x_api_key: Optional[str] = Header(None)):
-    require_api_key(x_api_key)
+def deals_recent(days: int = Query(1, ge=0, le=30), _: None = Depends(require_api_key)):
     svc = MT5Service()
+
+    if _is_webrequest_mode(svc):
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "error": "native_only_endpoint",
+                "endpoint": "/deals_recent",
+                "hint": "Em webrequest, só existe se o EA publicar history/deals (não implementado).",
+            },
+        )
+
     svc.ensure_up()
     return svc.deals_recent(days=days)
+
+
+# ====================== OHLCV / MARKET DATA =================
+
+# ====================== MARKET DATA (ALIASES REQUIRED BY LIVE) =================
+
+def _get_ohlcv_rows_webrequest(symbol: str, tf: str, limit: int) -> list:
+    st = STORE.snapshot()
+    sym = symbol.upper().strip()
+    t = tf.upper().strip()
+    key = f"{sym}:{t}"
+    rows = (st.ohlcv or {}).get(key) or []
+    if rows and limit:
+        rows = rows[-int(limit):]
+    return rows
+
+def _ohlcv_payload(symbol: str, tf: str, rows: list) -> dict:
+    return {
+        "ok": True,
+        "mode": "webrequest",
+        "symbol": symbol.upper().strip(),
+        "tf": tf.upper().strip(),
+        "rows": rows,
+        "count": len(rows),
+        **_ea_meta(),
+    }
+
+
+
+@router.get("/bars")
+def bars(
+    symbol: str = Query(...),
+    tf: str = Query("H1"),
+    limit: int = Query(1000, ge=1, le=5000),
+    _: None = Depends(require_api_key),
+):
+    svc = MT5Service()
+    if _is_webrequest_mode(svc):
+        rows = _get_ohlcv_rows_webrequest(symbol, tf, limit)
+        out = _ohlcv_payload(symbol, tf, rows)
+        out["bars"] = out["rows"]  # opcional
+        return out
+
+    svc.ensure_up()
+    return svc.ohlcv(symbol=symbol, tf=tf, limit=limit)
+
+
+@router.get("/quote")
+def quote(symbol: str = Query(...), _: None = Depends(require_api_key)):
+    svc = MT5Service()
+
+    if _is_webrequest_mode(svc):
+        st = STORE.snapshot()
+        sym = symbol.upper().strip()
+        q = (st.quotes or {}).get(sym)
+        if not q:
+            return {"ok": False, "mode": "webrequest", "symbol": sym, "hint": "EA ainda não publicou quote", **_ea_meta()}
+        return {"ok": True, "mode": "webrequest", **q, **_ea_meta()}
+
+    svc.ensure_up()
+    return svc.quote(symbol)
+
+
+@router.get("/symbol_info")
+def symbol_info(symbol: str = Query(...), _: None = Depends(require_api_key)):
+    svc = MT5Service()
+
+    if _is_webrequest_mode(svc):
+        st = STORE.snapshot()
+        sym = symbol.upper().strip()
+        info = (st.symbol_info or {}).get(sym)
+        if not info:
+            return {"ok": False, "mode": "webrequest", "symbol": sym, "hint": "EA ainda não publicou symbol_info", **_ea_meta()}
+        return {"ok": True, "mode": "webrequest", **info, **_ea_meta()}
+
+    svc.ensure_up()
+    return svc.symbol_info(symbol)
+
+
+# ====================== COMMAND STATUS / RESULTS (REDIS) =====
+
+def _commands_get_status(cmd_id: str, *, scope: str) -> Optional[Dict[str, Any]]:
+    return COMMANDS.get_command(cmd_id, scope=scope)
+
+def _commands_get_result(cmd_id: str, *, scope: str) -> Optional[Dict[str, Any]]:
+    return COMMANDS.get_result(cmd_id, scope=scope)
+
+@router.get("/command_status/{cmd_id}")
+def command_status(
+    cmd_id: str,
+    scope: str = Query("", description="scope override (default: IID/INSTANCE_ID)"),
+    _: None = Depends(require_api_key),
+):
+    meta = _ea_meta()
+    sc = _norm_scope(scope)
+
+    cmd = _commands_get_status(cmd_id, scope=sc)
+    if not cmd:
+        return {
+            "ok": False,
+            "cmd_id": cmd_id,
+            "scope": sc,
+            "found": False,
+            **meta,
+            "hint": "cmd_id não encontrado no Redis (ou expirou por TTL, ou scope errado).",
+        }
+
+    return {"ok": True, "cmd_id": cmd_id, "scope": sc, "found": True, "cmd": cmd, **meta}
+
+@router.get("/command_result/{cmd_id}")
+def command_result(
+    cmd_id: str,
+    scope: str = Query("", description="scope override (default: IID/INSTANCE_ID)"),
+    _: None = Depends(require_api_key),
+):
+    meta = _ea_meta()
+    sc = _norm_scope(scope)
+
+    r = _commands_get_result(cmd_id, scope=sc)
+    if not r:
+        return {"ok": False, "cmd_id": cmd_id, "scope": sc, "found": False, **meta}
+
+    return {"ok": True, "cmd_id": cmd_id, "scope": sc, "found": True, "result": r, **meta}
+

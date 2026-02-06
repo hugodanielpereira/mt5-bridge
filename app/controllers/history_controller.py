@@ -1,48 +1,127 @@
 # app/controllers/history_controller.py
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+import os
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from pandas import Timestamp, Timedelta, to_datetime
-import MetaTrader5 as mt5
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.services.mt5 import MT5Service
+from app.common.auth import require_api_key
+from app.common.service_registry import get_service
+from app.common.meta import bridge_instance_id
 
 router = APIRouter(tags=["history"])
 
-# --- helpers ---------------------------------------------------------------
 
-def _require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
-    import os
-    expected = os.getenv("X_API_KEY") or os.getenv("BRIDGE_API_KEY") or os.getenv("API_KEY")
-    if expected:
-        if not x_api_key or x_api_key != expected:
-            raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+# -----------------------------------------------------------------------------
+# Helpers (mode / errors)
+# -----------------------------------------------------------------------------
+def _is_webrequest_mode() -> bool:
+    mode = (os.getenv("MT5_MODE", "webrequest") or "webrequest").strip().lower()
+    return mode in ("webrequest", "http", "ea", "bridge")
 
-def _iso(v: Any) -> Optional[str]:
-    """Converte timestamps (epoch/MT5) em ISO-8601 UTC."""
+
+def _require_native_or_501(endpoint: str) -> None:
+    if _is_webrequest_mode():
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "error": "native_only_endpoint",
+                "endpoint": endpoint,
+                "mt5_mode": (os.getenv("MT5_MODE", "webrequest") or "webrequest"),
+                "hint": "Este endpoint requer MT5_MODE=native (MetaTrader5 python package). "
+                        "Em MT5_MODE=webrequest o bridge recebe dados do EA via WebRequest (EA->HTTP).",
+            },
+        )
+
+
+def _native_last_error() -> Optional[Tuple[Any, Any]]:
+    try:
+        if _is_webrequest_mode():
+            return None
+        import MetaTrader5 as mt5  # type: ignore
+        code, msg = mt5.last_error()
+        return (code, msg)
+    except Exception:
+        return None
+
+
+# -----------------------------------------------------------------------------
+# Helpers (time parsing / formatting)  [no pandas]
+# -----------------------------------------------------------------------------
+def _iso_utc(v: Any) -> Optional[str]:
+    """Converte epoch seconds / datetime-like / string -> ISO-8601 UTC."""
     if v is None:
         return None
+
+    # epoch seconds
     if isinstance(v, (int, float)):
         try:
-            return to_datetime(v, unit="s", utc=True).isoformat()
+            dt = datetime.fromtimestamp(float(v), tz=timezone.utc)
+            return dt.isoformat()
         except Exception:
             return None
-    # strings já ISO passam
+
+    # already a string
     if isinstance(v, str):
         return v
-    # datetime → ISO
+
+    # datetime-like
     if hasattr(v, "isoformat"):
         try:
-            # força timezone UTC se vier “naive”
-            if getattr(v, "tzinfo", None) is None:
-                v = v.replace(tzinfo=timezone.utc)
-            return v.isoformat()
+            dt = v  # type: ignore[assignment]
+            if getattr(dt, "tzinfo", None) is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt.isoformat()
         except Exception:
             return None
+
     return None
+
+
+def _parse_since(since: Optional[str]) -> Optional[datetime]:
+    """
+    since: ISO-8601 (idealmente com Z). Ex: 2025-12-13T00:00:00Z
+    """
+    if not since:
+        return None
+    s = since.strip()
+    try:
+        # suporta "...Z"
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+
+        dt = datetime.fromisoformat(s)
+
+        # se vier sem timezone, assumimos UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+
+        return dt
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid 'since' (use ISO-8601, ex: 2025-01-01T00:00:00Z)",
+        )
+
+
+def _now_utc() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+def _range_from_since_or_days(since_dt: Optional[datetime], days: int) -> Tuple[datetime, datetime]:
+    end = _now_utc()
+    if since_dt is not None:
+        start = since_dt
+    else:
+        start = end - timedelta(days=int(days))
+    return start, end
+
 
 def _filter_symbol(items: List[Dict[str, Any]], symbol: Optional[str]) -> List[Dict[str, Any]]:
     if not symbol:
@@ -50,51 +129,104 @@ def _filter_symbol(items: List[Dict[str, Any]], symbol: Optional[str]) -> List[D
     symu = symbol.upper()
     return [x for x in items if str(x.get("symbol", "")).upper() == symu]
 
+
 def _filter_magic(items: List[Dict[str, Any]], magic: Optional[int]) -> List[Dict[str, Any]]:
     if magic is None:
         return items
-    return [x for x in items if int(x.get("magic", -1)) == int(magic)]
+    try:
+        mi = int(magic)
+    except Exception:
+        return items
+    return [x for x in items if int(x.get("magic", -1) or -1) == mi]
 
-# --- rotas ----------------------------------------------------------------
 
+# -----------------------------------------------------------------------------
+# Row normalizers
+# -----------------------------------------------------------------------------
+def _deal_row(d: Any) -> Dict[str, Any]:
+    time_sec = getattr(d, "time", None)
+    time_msc = getattr(d, "time_msc", None)
+
+    deal_id = getattr(d, "deal", None)
+    if deal_id is None:
+        deal_id = getattr(d, "ticket", None)
+
+    return {
+        "time": _iso_utc(time_sec),
+        "time_msc": int(time_msc) if isinstance(time_msc, (int, float)) else None,
+        "deal": deal_id,
+        "order": getattr(d, "order", None),
+        "position_id": getattr(d, "position_id", None),
+        "symbol": getattr(d, "symbol", ""),
+        "type": getattr(d, "type", None),
+        "entry": getattr(d, "entry", None),
+        "price": getattr(d, "price", None),
+        "volume": getattr(d, "volume", None),
+        "profit": getattr(d, "profit", None),
+        "commission": getattr(d, "commission", None),
+        "swap": getattr(d, "swap", None),
+        "fee": getattr(d, "fee", None),
+        "magic": getattr(d, "magic", None),
+        "comment": getattr(d, "comment", ""),
+    }
+
+
+def _order_row(o: Any) -> Dict[str, Any]:
+    time_setup = getattr(o, "time_setup", None)
+    time_done = getattr(o, "time_done", None)
+    time_setup_msc = getattr(o, "time_setup_msc", None)
+    time_done_msc = getattr(o, "time_done_msc", None)
+
+    return {
+        "time_setup": _iso_utc(time_setup),
+        "time_done": _iso_utc(time_done),
+        "time_setup_msc": int(time_setup_msc) if isinstance(time_setup_msc, (int, float)) else None,
+        "time_done_msc": int(time_done_msc) if isinstance(time_done_msc, (int, float)) else None,
+        "order": getattr(o, "order", None),
+        "position_id": getattr(o, "position_id", None),
+        "symbol": getattr(o, "symbol", ""),
+        "type": getattr(o, "type", None),
+        "price_open": getattr(o, "price_open", None),
+        "volume_initial": getattr(o, "volume_initial", None),
+        "volume_current": getattr(o, "volume_current", None),
+        "magic": getattr(o, "magic", None),
+        "comment": getattr(o, "comment", ""),
+        "state": getattr(o, "state", None),
+        "reason": getattr(o, "reason", None),
+    }
+
+
+# -----------------------------------------------------------------------------
+# Deals / Orders (histórico)
+# -----------------------------------------------------------------------------
 @router.get("/deals_history")
 def deals_history(
     days: int = Query(7, ge=1, le=365),
     symbol: Optional[str] = Query(default=None),
     magic: Optional[int] = Query(default=None),
-    _: None = Depends(_require_api_key),
+    _: None = Depends(require_api_key),
 ):
-    """Trades fechadas (deals) dos últimos N dias (ISO UTC)."""
-    svc = MT5Service()
-    end = Timestamp.utcnow().to_pydatetime()
-    start = (Timestamp.utcnow() - Timedelta(days=days)).to_pydatetime()
+    _require_native_or_501("/deals_history")
+
+    svc = get_service()
+    svc.ensure_up()
+
+    start, end = _range_from_since_or_days(None, days)
     try:
         deals = svc.history_deals_get(start, end) or []
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"history_deals_get failed: {e}")
+        le = _native_last_error()
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "history_deals_get failed", "exc": str(e), "last_error": list(le) if le else None},
+        )
 
-    out: List[Dict[str, Any]] = []
-    for d in deals:
-        row = {
-            "time": _iso(getattr(d, "time", None)),
-            "symbol": getattr(d, "symbol", ""),
-            "entry": getattr(d, "entry", None),
-            "price": getattr(d, "price", None),
-            "volume": getattr(d, "volume", None),
-            "profit": getattr(d, "profit", None),
-            "magic": getattr(d, "magic", None),
-            "comment": getattr(d, "comment", ""),
-            "ticket": getattr(d, "ticket", None),
-            "position_id": getattr(d, "position_id", None),
-        }
-        out.append(row)
-
+    out = [_deal_row(d) for d in deals]
     out = _filter_symbol(out, symbol)
     out = _filter_magic(out, magic)
+    out.sort(key=lambda x: (x.get("time_msc") or 0, x.get("time") or ""))
 
-    # ordena cronologicamente por time
-    out.sort(key=lambda x: x["time"] or "")
-    return out
+    return {"ok": True, "bridge_instance_id": bridge_instance_id(), "count": len(out), "data": out}
 
 
 @router.get("/orders_history")
@@ -102,38 +234,35 @@ def orders_history(
     days: int = Query(7, ge=1, le=365),
     symbol: Optional[str] = Query(default=None),
     magic: Optional[int] = Query(default=None),
-    _: None = Depends(_require_api_key),
+    _: None = Depends(require_api_key),
 ):
-    """Orders históricas (ordens emitidas) dos últimos N dias (ISO UTC)."""
-    end = Timestamp.utcnow().to_pydatetime()
-    start = (Timestamp.utcnow() - Timedelta(days=days)).to_pydatetime()
+    _require_native_or_501("/orders_history")
+
+    svc = get_service()
+    svc.ensure_up()
+
+    start, end = _range_from_since_or_days(None, days)
+
     try:
-        orders = mt5.history_orders_get(start, end) or []
+        orders = svc.history.orders_recent(days=days)  # type: ignore[attr-defined]
+        try:
+            orders = svc.history.history_orders_get(start, end)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        orders = orders or []
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"history_orders_get failed: {e}")
+        le = _native_last_error()
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "history_orders_get failed", "exc": str(e), "last_error": list(le) if le else None},
+        )
 
-    out: List[Dict[str, Any]] = []
-    for o in orders:
-        row = {
-            "time_setup": _iso(getattr(o, "time_setup", None)),
-            "time_done":  _iso(getattr(o, "time_done", None)),
-            "symbol": getattr(o, "symbol", ""),
-            "type": getattr(o, "type", None),
-            "price_open": getattr(o, "price_open", None),
-            "volume_initial": getattr(o, "volume_initial", None),
-            "volume_current": getattr(o, "volume_current", None),
-            "magic": getattr(o, "magic", None),
-            "comment": getattr(o, "comment", ""),
-            "order": getattr(o, "order", None),
-        }
-        out.append(row)
-
+    out = [_order_row(o) for o in orders]
     out = _filter_symbol(out, symbol)
     out = _filter_magic(out, magic)
+    out.sort(key=lambda x: (x.get("time_done_msc") or 0, x.get("time_done") or x.get("time_setup") or ""))
 
-    # ordena por time_done, depois time_setup
-    out.sort(key=lambda x: (x["time_done"] or x["time_setup"] or ""))
-    return out
+    return {"ok": True, "bridge_instance_id": bridge_instance_id(), "count": len(out), "data": out}
 
 
 @router.get("/history")
@@ -141,96 +270,76 @@ def history(
     days: int = Query(7, ge=1, le=365),
     symbol: Optional[str] = Query(default=None),
     magic: Optional[int] = Query(default=None),
-    _: None = Depends(_require_api_key),
+    _: None = Depends(require_api_key),
 ):
-    """
-    Resumo: orders + deals dos últimos N dias (ISO UTC) com filtros opcionais:
-    - ?symbol=BTCUSD
-    - ?magic=7701
-    """
-    end = Timestamp.utcnow().to_pydatetime()
-    start = (Timestamp.utcnow() - Timedelta(days=days)).to_pydatetime()
+    _require_native_or_501("/history")
+    deals = deals_history(days=days, symbol=symbol, magic=magic, _=None)
+    orders = orders_history(days=days, symbol=symbol, magic=magic, _=None)
+    return {
+        "ok": True,
+        "bridge_instance_id": bridge_instance_id(),
+        "orders": orders["data"],
+        "deals": deals["data"],
+    }
 
-    # Orders
-    try:
-        orders_raw = mt5.history_orders_get(start, end) or []
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"history_orders_get failed: {e}")
 
-    orders = []
-    for o in orders_raw:
-        row = {
-            "time_setup": _iso(getattr(o, "time_setup", None)),
-            "time_done":  _iso(getattr(o, "time_done", None)),
-            "symbol": getattr(o, "symbol", ""),
-            "type": getattr(o, "type", None),
-            "price_open": getattr(o, "price_open", None),
-            "volume_initial": getattr(o, "volume_initial", None),
-            "volume_current": getattr(o, "volume_current", None),
-            "magic": getattr(o, "magic", None),
-            "comment": getattr(o, "comment", ""),
-            "order": getattr(o, "order", None),
-        }
-        orders.append(row)
-
-    orders = _filter_symbol(orders, symbol)
-    orders = _filter_magic(orders, magic)
-    orders.sort(key=lambda x: (x["time_done"] or x["time_setup"] or ""))
-
-    # Deals
-    svc = MT5Service()
-    try:
-        deals_raw = svc.history_deals_get(start, end) or []
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"history_deals_get failed: {e}")
-
-    deals = []
-    for d in deals_raw:
-        row = {
-            "time": _iso(getattr(d, "time", None)),
-            "symbol": getattr(d, "symbol", ""),
-            "entry": getattr(d, "entry", None),
-            "price": getattr(d, "price", None),
-            "volume": getattr(d, "volume", None),
-            "profit": getattr(d, "profit", None),
-            "magic": getattr(d, "magic", None),
-            "comment": getattr(d, "comment", ""),
-            "ticket": getattr(d, "ticket", None),
-            "position_id": getattr(d, "position_id", None),
-        }
-        deals.append(row)
-
-    deals = _filter_symbol(deals, symbol)
-    deals = _filter_magic(deals, magic)
-    deals.sort(key=lambda x: x["time"] or "")
-
-    return {"orders": orders, "deals": deals}
-
-# --- NOVA ROTA PARA O LAB (MT5-Bridge Connector) -----------------------------
-
-@router.post("/bridge/history")
-def bridge_history(
-    payload: dict,
-    _: None = Depends(_require_api_key),
+# -----------------------------------------------------------------------------
+# NOVO: Deals “since” para ledger (cursor-based)
+# -----------------------------------------------------------------------------
+@router.get("/deals_since")
+def deals_since(
+    since: Optional[str] = Query(default=None, description="ISO-8601 UTC (ex: 2025-01-01T00:00:00Z)"),
+    since_msc: Optional[int] = Query(default=None, description="cursor opcional (epoch ms) - preferível quando disponível"),
+    symbol: Optional[str] = Query(default=None),
+    magic: Optional[int] = Query(default=None),
+    limit: int = Query(2000, ge=1, le=5000),
+    _: None = Depends(require_api_key),
 ):
-    """
-    Endpoint usado exclusivamente pelo ML-Strategy-Lab.
-    A resposta vem diretamente do MT5Service().ohlcv().
-    """
-    symbol = payload.get("symbol")
-    timeframe = payload.get("timeframe")
-    start = payload.get("start")
-    end = payload.get("end")
-    limit = payload.get("limit", 1000)
+    _require_native_or_501("/deals_since")
 
-    if not symbol or not timeframe:
-        raise HTTPException(status_code=400, detail="Fields 'symbol' and 'timeframe' are required")
-
-    svc = MT5Service()
+    svc = get_service()
     svc.ensure_up()
 
+    if since_msc is not None and since_msc < 0:
+        raise HTTPException(status_code=400, detail="'since_msc' must be >= 0")
+
+    if since_msc is not None:
+        since_dt = datetime.fromtimestamp(int(since_msc) / 1000.0, tz=timezone.utc)
+        start = since_dt - timedelta(days=2)  # janela de segurança
+        end = _now_utc()
+    else:
+        since_dt = _parse_since(since)
+        start, end = _range_from_since_or_days(since_dt, days=7)
+
     try:
-        data = svc.ohlcv(symbol=symbol, tf=timeframe, start=start, end=end, limit=limit)
-        return {"ok": True, "data": data}
+        deals = svc.history_deals_get(start, end) or []
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        le = _native_last_error()
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "history_deals_get failed", "exc": str(e), "last_error": list(le) if le else None},
+        )
+
+    out = [_deal_row(d) for d in deals]
+    out = _filter_symbol(out, symbol)
+    out = _filter_magic(out, magic)
+
+    if since_msc is not None:
+        out = [x for x in out if (x.get("time_msc") or 0) > int(since_msc)]
+
+    out.sort(key=lambda x: (x.get("time_msc") or 0, x.get("time") or ""))
+
+    if len(out) > limit:
+        out = out[:limit]
+
+    next_cursor = None
+    if out:
+        next_cursor = max((x.get("time_msc") or 0) for x in out) or None
+
+    return {
+        "ok": True,
+        "bridge_instance_id": bridge_instance_id(),
+        "count": len(out),
+        "next_since_msc": next_cursor,
+        "data": out,
+    }

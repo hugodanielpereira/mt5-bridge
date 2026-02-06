@@ -2,9 +2,8 @@ fastapi
 uvicorn[standard]
 python-dotenv
 pydantic
-MetaTrader5
-pandas
-numpy
-scikit-learn
 jinja2>=3.1,<4
 psutil
+requests>=2.31
+redis>=5.0
+psycopg[binary]>=3.1

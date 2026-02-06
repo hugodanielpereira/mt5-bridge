@@ -1,14 +1,14 @@
 // app/ui/static/js/dashboard.js
 (async function(){
-  // ==== refs a elementos existentes no HTML ====
+  if (!window.API_BASE) window.API_BASE = '/ui/api';
+  if (!window.API_ORIGIN) window.API_ORIGIN = '';
+
   const $ts = document.getElementById('ts');
   const $bridge = document.getElementById('bridgeCard');
   const $exec = document.getElementById('executorCard');
   const $retr = document.getElementById('retrainCard');
   const $watch = document.getElementById('watcherCard');
   const $emit  = document.getElementById('emitterCard');
-  const $gov   = document.getElementById('governorCard');
-  const $prom  = document.getElementById('promoterCard');
   const $pm    = document.getElementById('posManagerCard');
 
   const $strategies = document.getElementById('strategies');
@@ -16,17 +16,11 @@
   const $healthLine = document.getElementById('healthLine');
   const $refreshBtn = document.getElementById('refreshBtn');
 
-  // --------------------------------------------------
-  // Helpers
-  // --------------------------------------------------
-  async function _fetchExecutorState() {
-    try { return await api('/executor_state'); } catch(_){ return {}; }
-  }
-  async function _fetchSchedulerState() {
-    try { return await api('/scheduler_state'); } catch(_){ return {}; }
-  }
+  async function _fetchExecutorState(){ try { return await api('/executor_state'); } catch(_) { return {}; } }
+  async function _fetchSchedulerState(){ try { return await api('/scheduler_state'); } catch(_) { return {}; } }
+  async function _fetchEnv(){ try { return await api('/env'); } catch(_) { return null; } }
 
-  function _isMissingNum(x) {
+  function _isMissingNum(x){
     return x === null || x === undefined || (typeof x === 'number' && !isFinite(x));
   }
 
@@ -41,14 +35,14 @@
     });
   }
 
-  function setLight(el, state, title) {
+  function setLight(el, state, title){
     if (!el) return;
     el.classList.remove("ok","warn","bad","off");
     el.classList.add(state || "off");
     if (title) el.title = title;
   }
 
-  function fmtMeta(mem, upt) {
+  function fmtMeta(mem, upt){
     if (mem == null && upt == null) return "";
     const m = mem != null ? `${Math.round(mem)} MB` : "–";
     const u = upt != null ? `${Math.round(upt)} s` : "–";
@@ -65,10 +59,96 @@
     return `${m}m`;
   }
   const basename = p => (p || '').split(/[\\/]/).pop() || '—';
-
   const fmtNumSafe = (x)=> (typeof window.fmtNum==='function' ? window.fmtNum(x) : fmt1(x));
 
-  async function showLog(name = 'retrain.log', n = 300){
+  // ==================================================
+  // Instance Badge (usa #instanceBadgeHost)
+  // ==================================================
+  function _originFromApiOrigin(){
+    const o = (window.API_ORIGIN || '').trim();
+    return o || window.location.origin;
+  }
+
+  function _guessInstanceFromPort(){
+    try {
+      const u = new URL(_originFromApiOrigin());
+      return u.port ? `:${u.port}` : '—';
+    } catch(_) {
+      return '—';
+    }
+  }
+
+  function ensureInstanceBadge(){
+    let el = document.getElementById('instanceBadge');
+    if (el) return el;
+
+    el = document.createElement('div');
+    el.id = 'instanceBadge';
+    el.style.padding = '8px 10px';
+    el.style.borderRadius = '10px';
+    el.style.display = 'inline-flex';
+    el.style.gap = '10px';
+    el.style.alignItems = 'center';
+    el.style.margin = '8px 0';
+    el.style.fontSize = '13px';
+    el.style.border = '1px solid rgba(255,255,255,0.12)';
+    el.style.background = 'rgba(255,255,255,0.04)';
+    el.style.color = 'inherit';
+
+    const host = document.getElementById('instanceBadgeHost');
+    if (host) {
+      host.innerHTML = '';
+      host.appendChild(el);
+    } else {
+      const banner = document.getElementById('globalStatus');
+      if (banner && banner.parentNode) banner.parentNode.insertBefore(el, banner);
+      else document.body.insertBefore(el, document.body.firstChild);
+    }
+    return el;
+  }
+
+  function setInstanceBadge(env){
+    const el = ensureInstanceBadge();
+
+    const iid = (env && (env.iid || env.instance_id || env.instance)) || '';
+    const instDir = env && (env.instance_dir || '');
+    const apiOrigin = _originFromApiOrigin();
+    const portHint = _guessInstanceFromPort();
+
+    const label = document.createElement('span');
+    label.className = 'tag';
+    label.textContent = `Instance: ${iid || portHint || '—'}`;
+
+    const meta = document.createElement('span');
+    meta.className = 'muted';
+    meta.style.opacity = '0.85';
+
+    const rightBits = [];
+    if (apiOrigin) rightBits.push(apiOrigin);
+    if (instDir) rightBits.push(instDir);
+    meta.textContent = rightBits.join(' · ');
+
+    const isProd = String(iid).toUpperCase().includes('PROD');
+    el.style.boxShadow = isProd
+      ? '0 0 0 1px rgba(255,100,100,0.25)'
+      : '0 0 0 1px rgba(100,180,255,0.25)';
+
+    el.innerHTML = '';
+    el.appendChild(label);
+    el.appendChild(meta);
+  }
+
+  async function initInstanceBadge(){
+    try{
+      const env = await _fetchEnv();
+      if (env) setInstanceBadge(env);
+      else setInstanceBadge(null);
+    }catch(_){
+      setInstanceBadge(null);
+    }
+  }
+
+  async function showLog(name='retrain.log', n=300){
     const out = document.getElementById('out');
     if (!out) return;
     try{
@@ -76,11 +156,10 @@
       out.value = (typeof txt === 'string') ? txt : JSON.stringify(txt, null, 2);
       out.scrollTop = out.scrollHeight;
     }catch(e){
-      out.value = 'Erro a carregar log: ' + e;
+      out.value = 'Erro a carregar log: ' + (e?.message || e);
     }
   }
 
-  // --- contador de refresh automático (15s) ---
   let _refreshTicker = null, _refreshLeft = 0;
   function startAutoRefresh(runNow){
     const banner = document.getElementById('globalStatusCountdown');
@@ -100,15 +179,14 @@
     if (runNow) document.getElementById('refreshBtn')?.click();
   }
 
-  // -------------------------------------------------------
-  // loadHealth — lê /ui/api/status e preenche todos os cards
-  // -------------------------------------------------------
+  // ==================================================
+  // loadHealth
+  // ==================================================
   async function loadHealth(){
     try{
       const s = await api('/status');
       if ($ts) $ts.textContent = 'Atualizado: ' + new Date().toLocaleString();
 
-      // ---------- BRIDGE ----------
       const b = s?.bridge || {};
       const bOk = !!b.ok || !!b.diag?.ok;
       kv($bridge, [
@@ -126,7 +204,6 @@
         b.uptime_s != null ? Math.round(b.uptime_s) : null
       );
 
-      // ---------- EXECUTOR ----------
       let e = s?.executor || {};
       if (!e || (!e.pid && (_isMissingNum(e.cpu_s) || _isMissingNum(e.mem_mb) || _isMissingNum(e.uptime_s)))) {
         const es = await _fetchExecutorState();
@@ -150,7 +227,6 @@
         ['Log file', basename(e.log_file)],
         ['Uptime', fmtUptimeSec(e.uptime_s)],
       ]);
-
       const eState = (e.fresh === false) ? 'bad' : (e.pid ? 'ok' : 'off');
       setLight(document.getElementById('light-exec'), eState, 'Executor');
       const eMeta = document.getElementById('meta-exec');
@@ -159,7 +235,6 @@
         e.uptime_s != null ? Math.round(e.uptime_s) : null
       );
 
-      // ---------- RETRAIN ----------
       let r = s?.retrain || {};
       if (!r || (!r.pid && (_isMissingNum(r.cpu_s) || _isMissingNum(r.mem_mb) || _isMissingNum(r.uptime_s)))) {
         const rs = await _fetchSchedulerState();
@@ -185,7 +260,6 @@
         ['Uptime', fmtUptimeSec(r.uptime_s)],
         ['Locks', (Array.isArray(r.locks) && r.locks.length) ? r.locks.join(', ') : 'none'],
       ]);
-
       const rState = (r.fresh === false) ? 'warn' : (r.pid ? 'ok' : 'off');
       setLight(document.getElementById('light-retrain'), rState, 'Retrain');
       const rMeta = document.getElementById('meta-retrain');
@@ -194,7 +268,6 @@
         r.uptime_s != null ? Math.round(r.uptime_s) : null
       );
 
-      // ---------- WATCHER ----------
       const w = s?.watcher || {};
       if ($watch){
         kv($watch, [
@@ -214,7 +287,6 @@
         w.uptime_s != null ? Math.round(w.uptime_s) : null
       );
 
-      // ---------- EMITTER ----------
       const m = s?.emitter || {};
       if ($emit){
         kv($emit, [
@@ -234,63 +306,8 @@
         m.uptime_s != null ? Math.round(m.uptime_s) : null
       );
 
-      // ---------- GOVERNOR ----------
-      const g = s?.governor || {};
-      const gs = g.state || {};
-      const g_pid = g.pid ?? gs.pid;
-      const g_mem = g.mem_mb ?? gs.mem_mb;
-      const g_upt = g.uptime_s ?? gs.uptime_s;
-      const g_ok = !!g_pid || !!gs.pid;
-
-      if ($gov) {
-        kv($gov, [
-          ['PID', g_pid ?? '—'],
-          ['CPU (s)', fmt1(g.cpu_s ?? gs.cpu_s)],
-          ['Mem (MB)', g_mem != null ? Math.round(g_mem) : '—'],
-          ['Uptime', fmtUptimeSec(g_upt)],
-          ['Fresh', String(g.fresh ?? gs.fresh ?? '—')],
-          ['Log age (min)', g.log_age_min ?? '—'],
-          ['Log file', basename(g.log_file)],
-        ]);
-      }
-      setLight(document.getElementById('light-governor'), g_ok ? 'ok' : 'off', 'Governor');
-      const gMeta = document.getElementById('meta-governor');
-      if (gMeta) gMeta.textContent = fmtMeta(
-        g_mem != null ? Math.round(g_mem) : null,
-        g_upt != null ? Math.round(g_upt) : null
-      );
-
-      // ---------- PROMOTER ----------
-      const p = s?.promoter || {};
-      const ps = p.state || {};
-      const p_pid = p.pid ?? ps.pid;
-      const p_mem = p.mem_mb ?? ps.mem_mb;
-      const p_upt = p.uptime_s ?? ps.uptime_s;
-      const p_ok = !!p_pid || !!ps.pid;
-
-      if ($prom) {
-        kv($prom, [
-          ['PID', p_pid ?? '—'],
-          ['CPU (s)', fmt1(p.cpu_s ?? ps.cpu_s)],
-          ['Mem (MB)', p_mem != null ? Math.round(p_mem) : '—'],
-          ['Uptime', fmtUptimeSec(p_upt)],
-          ['Fresh', String(p.fresh ?? ps.fresh ?? '—')],
-          ['Log age (min)', p.log_age_min ?? '—'],
-          ['Log file', basename(p.log_file)],
-          ['Scan every (min)', p.scan_every_min ?? ps.scan_every_min ?? '—'],
-          ['Require MODEL_OK', String(p.require_model_ok ?? ps.require_model_ok ?? '—')],
-        ]);
-      }
-      setLight(document.getElementById('light-promoter'), p_ok ? 'ok' : 'off', 'Promoter');
-      const pMeta = document.getElementById('meta-promoter');
-      if (pMeta) pMeta.textContent = fmtMeta(
-        p_mem != null ? Math.round(p_mem) : null,
-        p_upt != null ? Math.round(p_upt) : null
-      );
-
-      // ---------- POSITION MANAGER ----------
       const pm = s?.position_manager || {};
-      if ($pm) {
+      if ($pm){
         kv($pm, [
           ['PID', pm.pid ?? '—'],
           ['Mem (MB)', pm.mem_mb != null ? Math.round(pm.mem_mb) : '—'],
@@ -305,7 +322,6 @@
         pm.uptime_s != null ? Math.round(pm.uptime_s) : null
       );
 
-      // ---------- TOP BANNER ----------
       const banner = document.getElementById("globalStatus");
       if (banner){
         let state='ok', msg='✅ Serviços operacionais';
@@ -327,8 +343,8 @@
         banner.textContent = msg + ' ';
         banner.appendChild(right);
       }
-    } catch(e){
-      if ($healthLine) $healthLine.textContent = 'Falha health: ' + e;
+    }catch(e){
+      if ($healthLine) $healthLine.textContent = 'Falha health: ' + (e?.message || e);
       const banner = document.getElementById("globalStatus");
       if (banner){
         banner.className = 'status-banner off';
@@ -339,33 +355,25 @@
       kv($retr,   [['PID','—'],['CPU (s)','—'],['Mem (MB)','—'],['Log age (min)','—'],['Uptime','—'],['Locks','—']]);
       if ($watch){ kv($watch,[['PID','—'],['CPU (s)','—'],['Mem (MB)','—'],['Log age (min)','—'],['Uptime','—']]); }
       if ($emit){  kv($emit, [['PID','—'],['CPU (s)','—'],['Mem (MB)','—'],['Log age (min)','—'],['Uptime','—']]); }
-      if ($gov){   kv($gov,  [['PID','—'],['Uptime','—']]); }
-      if ($prom){  kv($prom, [['PID','—'],['Uptime','—']]); }
       if ($pm){    kv($pm,   [['PID','—'],['Uptime','—']]); }
 
-      setLight(document.getElementById('light-bridge'),'off');
-      setLight(document.getElementById('light-exec'),'off');
-      setLight(document.getElementById('light-retrain'),'off');
-      setLight(document.getElementById('light-watcher'),'off');
-      setLight(document.getElementById('light-emitter'),'off');
-      setLight(document.getElementById('light-governor'),'off');
-      setLight(document.getElementById('light-promoter'),'off');
-      setLight(document.getElementById('light-posmanager'),'off');
-      ['meta-bridge','meta-exec','meta-retrain','meta-watcher','meta-emitter','meta-governor','meta-promoter','meta-posmanager']
-        .forEach(id=>{
-          const el=document.getElementById(id); if(el) el.textContent='';
-        });
+      ['light-bridge','light-exec','light-retrain','light-watcher','light-emitter','light-posmanager']
+        .forEach(id=>setLight(document.getElementById(id),'off'));
+
+      ['meta-bridge','meta-exec','meta-retrain','meta-watcher','meta-emitter','meta-posmanager']
+        .forEach(id=>{ const el=document.getElementById(id); if(el) el.textContent=''; });
     }
   }
 
-  // --------------------------------------------------
-  // Load Strategies Table
-  // -------------------------------------------------
+  // ==================================================
+  // Strategies + Portfolio
+  // ==================================================
   async function loadStrategies(){
     try{
       const data = await api('/strategies');
       if (Array.isArray(data?.rows) && data.rows.length){
         $yaml && ($yaml.style.display='none');
+
         const tbl = document.createElement('table');
         tbl.innerHTML = `
           <thead><tr>
@@ -374,24 +382,34 @@
           </tr></thead>
           <tbody></tbody>`;
         const tb = tbl.querySelector('tbody');
+
+        const apiOrigin = _originFromApiOrigin();
         data.rows.forEach(r=>{
           const tr=document.createElement('tr');
           const fonte = r.source || 'schedule';
+          const cfg = r.config_file || '';
+          const cfgBase = basename(cfg);
+
+          const viewCfgUrl = cfg
+            ? `${apiOrigin}${window.API_BASE}/view_config?file=${encodeURIComponent(cfgBase)}`
+            : '';
+
           tr.innerHTML = `
             <td>${r.symbol||'-'}</td>
             <td><span class="tag">${r.timeframe||'-'}</span></td>
-            <td><a class="tag" href="${r.source_url||'#'}">${fonte}</a></td>
+            <td><span class="tag">${fonte}</span></td>
             <td>${fmtNumSafe(r.window_min)}</td>
             <td>${fmtNumSafe(r.last_run_min)}</td>
             <td>${r.due?'<span class="ok">Sim</span>':'<span class="muted">Não</span>'}</td>
             <td>${fmtNumSafe(r.next_in_min)}</td>
-            <td class="mono">${r.config_file||'-'}</td>
+            <td class="mono">${cfg || '-'}</td>
             <td class="actions">
-              <button class="btn-small" data-cfg="${r.config_file||''}" data-symbol="${r.symbol||''}">Run</button>
-              ${r.config_file? `<a class="btn-small" href="${(window.API_ORIGIN||'') + (window.API_BASE||'')}/view_config?file=${encodeURIComponent(r.config_file)}" target="_blank">Ver cfg</a>`:''}
+              <button class="btn-small" data-cfg="${cfg}" data-symbol="${r.symbol||''}">Run</button>
+              ${cfg ? `<a class="btn-small" href="${viewCfgUrl}" target="_blank">Ver cfg</a>` : ''}
             </td>`;
           tb.appendChild(tr);
         });
+
         $strategies.innerHTML='';
         $strategies.appendChild(tbl);
 
@@ -405,7 +423,9 @@
               });
               appendOut(JSON.stringify(j,null,2));
               await refreshAll();
-            }catch(e){ appendOut('erro: '+e); }
+            }catch(e){
+              appendOut('erro: ' + (e?.message || e));
+            }
           });
         });
         return;
@@ -415,18 +435,11 @@
     try{
       const y = await api('/schedule_yaml');
       $strategies.innerHTML='';
-      if ($yaml){ $yaml.style.display=''; $yaml.textContent = typeof y==='string' ? y : JSON.stringify(y,null,2); }
-      return;
-    }catch(_){}
-
-    try{
-      const r = await fetch('/ui/retrain.yaml');
-      if (r.ok){
-        const txt = await r.text();
-        $strategies.innerHTML='';
-        if ($yaml){ $yaml.style.display=''; $yaml.textContent = txt; }
-        return;
+      if ($yaml){
+        $yaml.style.display='';
+        $yaml.textContent = typeof y==='string' ? y : JSON.stringify(y,null,2);
       }
+      return;
     }catch(_){}
 
     $strategies.innerHTML='<div class="muted">Sem estratégias.</div>';
@@ -436,7 +449,7 @@
   async function loadPortfolioBox(){
     const box = document.getElementById('portfolioBox');
     if (!box) return;
-    try {
+    try{
       const data = await api('/portfolio');
       const items = Array.isArray(data?.items) ? data.items : (data?.selection?.items || []);
       if (!items || !items.length){
@@ -444,7 +457,7 @@
         return;
       }
       let html = '<table><thead><tr><th>#</th><th>Symbol</th><th>TF</th><th>PF</th><th>Trades</th><th>Sharpe</th><th>maxDD</th></tr></thead><tbody>';
-      items.forEach((it, i)=>{
+      items.forEach((it,i)=>{
         html += `<tr>
           <td>${i+1}</td>
           <td>${it.symbol||'-'}</td>
@@ -457,14 +470,14 @@
       });
       html += '</tbody></table>';
       box.innerHTML = html;
-    } catch(e){
-      box.innerHTML = '<div class="muted">Erro a ler portfolio: '+e+'</div>';
+    }catch(e){
+      box.innerHTML = '<div class="muted">Erro a ler portfolio: '+(e?.message || e)+'</div>';
     }
   }
 
-  // --------------------------------------------------
-  // Refresh logic + spinner visual
-  // --------------------------------------------------
+  // ==================================================
+  // Refresh (spinner)
+  // ==================================================
   const spinner = document.createElement('span');
   spinner.innerHTML = ' ⟳';
   spinner.style.animation = 'spin 1s linear infinite';
@@ -474,29 +487,27 @@
   if ($refreshBtn) $refreshBtn.parentNode.insertBefore(spinner, $refreshBtn.nextSibling);
 
   const style = document.createElement('style');
-  style.textContent = `
-  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-  `;
+  style.textContent = `@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`;
   document.head.appendChild(style);
 
-  async function refreshAll() {
-    try {
-      if ($refreshBtn) {
+  async function refreshAll(){
+    try{
+      if ($refreshBtn){
         $refreshBtn.disabled = true;
         spinner.style.display = 'inline-block';
       }
       await Promise.all([loadHealth(), loadStrategies(), loadPortfolioBox()]);
-    } finally {
-      if ($refreshBtn) {
+    }finally{
+      if ($refreshBtn){
         $refreshBtn.disabled = false;
         spinner.style.display = 'none';
       }
     }
   }
 
-  // --------------------------------------------------
-  // Botões principais (dashboard)
-  // --------------------------------------------------
+  // ==================================================
+  // Buttons
+  // ==================================================
   $refreshBtn?.addEventListener('click', refreshAll);
 
   document.getElementById('runDueBtn')?.addEventListener('click', async ()=>{
@@ -504,10 +515,10 @@
       const j = await api('/retrain_run_due', {method:'POST'});
       appendOut(JSON.stringify(j,null,2));
       const st = await api('/status');
-      const lf = st?.retrain?.log_file || 'scheduler_retrain.log';
+      const lf = st?.retrain?.log_file || 'retrain.log';
       await showLog(basename(lf), 400);
       await refreshAll();
-    }catch(e){ appendOut('erro: '+e); }
+    }catch(e){ appendOut('erro: '+(e?.message || e)); }
   });
 
   document.getElementById('runAllBtn')?.addEventListener('click', async ()=>{
@@ -515,10 +526,10 @@
       const j = await api('/retrain_run_all', {method:'POST'});
       appendOut(JSON.stringify(j,null,2));
       const st = await api('/status');
-      const lf = st?.retrain?.log_file || 'scheduler_retrain.log';
+      const lf = st?.retrain?.log_file || 'retrain.log';
       await showLog(basename(lf), 400);
       await refreshAll();
-    }catch(e){ appendOut('erro: '+e); }
+    }catch(e){ appendOut('erro: '+(e?.message || e)); }
   });
 
   document.getElementById('rebuildBtn')?.addEventListener('click', async ()=>{
@@ -526,39 +537,38 @@
       const j = await api('/retrain_rebuild', {method:'POST'});
       appendOut(JSON.stringify(j,null,2));
       await loadStrategies();
-    }catch(e){ appendOut('erro: '+e); }
+    }catch(e){ appendOut('erro: '+(e?.message || e)); }
   });
 
   document.getElementById('viewScheduleBtn')?.addEventListener('click', ()=>{
-    window.open((window.API_ORIGIN||'') + (window.API_BASE||'') + '/view_schedule', '_blank');
+    window.open(`${_originFromApiOrigin()}${window.API_BASE}/view_schedule`, '_blank');
   });
 
   async function proc(action){
-    const tgt = document.getElementById('procTarget').value;
+    const tgt = document.getElementById('procTarget')?.value || '';
     try{
-      const j = await api('/proc_run', {
-        method:'POST',
-        body: JSON.stringify({target:tgt, action})
-      });
+      const j = await api('/proc_run', { method:'POST', body: JSON.stringify({target:tgt, action}) });
       appendOut(JSON.stringify(j,null,2));
       await refreshAll();
-    }catch(e){ appendOut('erro: '+e); }
+    }catch(e){ appendOut('erro: '+(e?.message || e)); }
   }
 
   document.getElementById('procUpBtn')?.addEventListener('click', ()=>proc('start'));
   document.getElementById('procDownBtn')?.addEventListener('click', ()=>proc('stop'));
   document.getElementById('procRestartBtn')?.addEventListener('click', ()=>proc('restart'));
 
-  // --------------------------------------------------
-  // Inicialização
-  // --------------------------------------------------
+  // ==================================================
+  // Init
+  // ==================================================
+  await initInstanceBadge();
   await refreshAll();
   startAutoRefresh(true);
 
-  // ====== LOG VIEWER ======
+  // ==================================================
+  // Log viewer
+  // ==================================================
   (function(){
     const logsCard = document.querySelector('#strategies')?.closest('.card')?.nextElementSibling?.nextElementSibling;
-    // (Jobs card -> Portfolio card -> Logs card)  => logsCard = Logs
     const logArea = document.getElementById('out');
     if (!logsCard || !logArea) return;
 
@@ -568,8 +578,6 @@
     bar.style.marginBottom = '8px';
 
     const sel = document.createElement('select');
-    sel.id = 'logSelect';
-
     const tailN = document.createElement('input');
     tailN.type = 'number'; tailN.min = '50'; tailN.value = '200';
     tailN.style.width='80px'; tailN.title='N últimas linhas';
@@ -584,6 +592,7 @@
     logsCard.insertBefore(bar, logArea);
 
     async function populateLogs(){
+      const defaults = ['executor.log','retrain.log','watch_signals.log','emitter.log','position_manager.log'];
       try{
         const j = await api('/logs/list');
         sel.innerHTML = '';
@@ -594,16 +603,15 @@
           sel.appendChild(o);
         });
         if (!sel.value){
-          ['executor.log','scheduler_retrain.log','retrain.log','watch_signals.log','emitter.log','governor.log','promoter.log','position_manager.log']
-            .forEach(n=>{
-              const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
-            });
-        }
-      }catch(e){
-        ['executor.log','scheduler_retrain.log','retrain.log','watch_signals.log','emitter.log','governor.log','promoter.log','position_manager.log']
-          .forEach(n=>{
+          defaults.forEach(n=>{
             const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
           });
+        }
+      }catch(_){
+        sel.innerHTML = '';
+        defaults.forEach(n=>{
+          const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
+        });
       }
     }
 
@@ -612,10 +620,10 @@
       const n = Math.max(10, parseInt(tailN.value||'200',10));
       try{
         const txt = await api(`/logs/get?name=${encodeURIComponent(name)}&n=${n}`);
-        logArea.value = typeof txt==='string'? txt : JSON.stringify(txt,null,2);
+        logArea.value = typeof txt==='string' ? txt : JSON.stringify(txt,null,2);
         logArea.scrollTop = logArea.scrollHeight;
       }catch(e){
-        logArea.value = 'Erro a carregar log: ' + e;
+        logArea.value = 'Erro a carregar log: ' + (e?.message || e);
       }
     }
 

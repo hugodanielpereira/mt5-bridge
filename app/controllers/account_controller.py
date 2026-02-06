@@ -1,20 +1,33 @@
-from typing import Optional
-from fastapi import APIRouter, Header
+# app/controllers/account_controller.py
+from __future__ import annotations
 
-from app.shareweb import require_api_key
-from app.services.mt5 import MT5Service
+import logging
+
+from fastapi import APIRouter, HTTPException
+
+from app.common.service_registry import get_service
 
 router = APIRouter(tags=["account"])
+log = logging.getLogger("bridge")
+
 
 @router.get("/account")
-def account(x_api_key: Optional[str] = Header(None)):
-    require_api_key(x_api_key)
-    svc = MT5Service()
-    svc.ensure_up()
-    return svc.account_info()
+def account():
+    try:
+        svc = get_service()
+        svc.ensure_up()
+        return svc.account_info()
+    except Exception as e:
+        log.exception("account failed")
+        raise HTTPException(status_code=500, detail={"error": "account crashed", "exc": str(e)})
+
 
 @router.get("/diag")
-def diag(x_api_key: Optional[str] = Header(None)):
-    require_api_key(x_api_key)
-    svc = MT5Service()
-    return svc.diag()
+def diag():
+    try:
+        svc = get_service()
+        svc.ensure_up()
+        return svc.diag()
+    except Exception as e:
+        log.exception("diag failed")
+        raise HTTPException(status_code=500, detail={"error": "diag crashed", "exc": str(e)})

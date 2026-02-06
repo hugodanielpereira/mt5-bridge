@@ -1,5 +1,6 @@
-# app/ui/routes/api_dash.py
+# bridges/mt5-bridge/app/ui/routes/api_dash.py
 from __future__ import annotations
+
 import os
 import json
 import shlex
@@ -11,85 +12,169 @@ from typing import Any, Dict, Optional, List, Tuple
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from app.common.service_registry import get_service
+from app.common.path_utils import norm_path, project_root, apps_root, logs_dir as logs_root
+
 router = APIRouter(prefix="/ui/api", tags=["ui-dash"])
 
-# ---------------------------------------------------
-# Helpers
-# ---------------------------------------------------
-def _apps_root() -> Path:
-    # 1) .env oficial (ideal: PROJECT_DIR = .../apps/ml-strategy-lab)
-    env = os.getenv("PROJECT_DIR")
-    if env:
-        return Path(env)
-    # 2) compat legado
-    env2 = os.getenv("MLSL_APPS_DIR")
-    if env2:
-        return Path(env2)
-    # 3) heurística (quando tudo falha)
-    here = Path(__file__).resolve()
-    # .../bridges/mt5-bridge/app/ui/routes/api_dash.py
-    # queremos .../apps/ml-strategy-lab
-    bridges_dir = here.parents[4]  # mt5-bridge
-    root = bridges_dir.parent      # bridges
-    return root.parent / "apps" / "ml-strategy-lab"
+# ===================================================
+# Instance + Paths (RUNTIME, instance-aware)
+# ===================================================
+
+def _iid() -> str:
+    return (
+        os.getenv("MLSL_INSTANCE_ID")
+        or os.getenv("IID")
+        or os.getenv("BRIDGE_ID")
+        or "default"
+    ).strip()
 
 def _python_exe() -> str:
     return os.getenv("VENV_PY") or "python"
 
-def _schedule_file() -> Path:
-    env = os.getenv("RETRAIN_SCHEDULE_FILE")
-    if env:
-        return Path(env)
-    return _apps_root() / "outputs" / "live" / "schedules" / "retrain.yaml"
+def _apps_root() -> Path:
+    # raiz do MLSL dentro do mono-repo
+    return apps_root()
 
-def _timestamps_file() -> Path:
-    env = os.getenv("RETRAIN_TIMESTAMPS_FILE")
+def _live_root() -> Path:
+    env = (os.getenv("LIVE_DIR") or "").strip()
     if env:
-        return Path(env)
-    return _apps_root() / "outputs" / "live" / "schedules" / "retrain.timestamps.json"
+        return norm_path(env, base=_apps_root())
+    return _apps_root() / "outputs" / "live"
+
+def _instance_dir() -> Path:
+    env = (os.getenv("INSTANCE_DIR") or "").strip()
+    if env:
+        return norm_path(env, base=_live_root())
+    return _live_root() / "instances" / _iid()
+
+def _logs_inst_dir() -> Path:
+    """
+    Preferir logs por instância: <Trading>/logs/instances/<IID>
+    Se LOGS_INST vier no env, usa.
+    """
+    env = (os.getenv("LOGS_INST") or "").strip()
+    if env:
+        return norm_path(env, base=project_root())
+    return logs_root() / "instances" / _iid()
+
+def _logs_dir() -> Path:
+    """
+    Diretório de logs (por instância).
+    """
+    # aceita também LOGS_DIR/LAB_LOGS_DIR por compat
+    env = (os.getenv("LOGS_INST") or os.getenv("LOGS_DIR") or os.getenv("LAB_LOGS_DIR") or "").strip()
+    if env:
+        return norm_path(env, base=project_root())
+    return _logs_inst_dir()
+
+def _pids_dir() -> Path:
+    env = (os.getenv("PIDS_DIR") or os.getenv("PIDFILES_DIR") or "").strip()
+    if env:
+        p = norm_path(env, base=project_root())
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    li = (os.getenv("LOGS_INST") or "").strip()
+    if li:
+        p = norm_path(li, base=project_root()) / "pids"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    raise HTTPException(status_code=500, detail="PID dir não resolvido: define PIDS_DIR (ou LOGS_INST).")
+
+def _configs_dir() -> Path:
+    env = (os.getenv("CONFIGS_DIR") or "").strip()
+    if env:
+        return norm_path(env, base=_instance_dir())
+    return _instance_dir() / "configs"
+
+def _models_root() -> Path:
+    env = (os.getenv("MODELS_ROOT") or "").strip()
+    if env:
+        return norm_path(env, base=_instance_dir())
+    return _instance_dir() / "models"
 
 def _models_latest_dir(symbol: str | None, timeframe: str | None) -> Path:
     s = (symbol or "").strip().upper()
     tf = (timeframe or "").strip().upper()
-    return _apps_root() / "outputs" / "live" / "models" / s / tf / "latest"
+    return _models_root() / s / tf / "latest"
 
 def _signals_dir() -> Path:
-    env = os.getenv("SIGNALS_DIR")
+    env = (os.getenv("SIGNALS_DIR") or "").strip()
     if env:
-        return Path(env)
-    return _apps_root() / "outputs" / "live" / "signals"
+        return norm_path(env, base=_instance_dir())
+    return _instance_dir() / "signals"
 
-def _logs_dir() -> Path:
-    # ⚠️ Estes logs são os do LAB (não os da raiz ~/Trading/logs)
-    env = os.getenv("LAB_LOGS_DIR")
+def _metrics_dir() -> Path:
+    env = (os.getenv("METRICS_DIR") or "").strip()
     if env:
-        return Path(env)
-    return _apps_root() / "outputs" / "live" / "logs"
+        return norm_path(env, base=_instance_dir())
+    return _instance_dir() / "metrics"
+
+def _schedules_dir() -> Path:
+    env = (os.getenv("SCHEDULES_DIR") or "").strip()
+    if env:
+        return norm_path(env, base=_instance_dir())
+    return _instance_dir() / "schedules"
+
+def _policies_dir() -> Path:
+    env = (os.getenv("POLICIES_DIR") or "").strip()
+    if env:
+        return norm_path(env, base=_instance_dir())
+    return _instance_dir() / "policies"
+
+def _schedule_file() -> Path:
+    env = (os.getenv("RETRAIN_SCHEDULE_FILE") or "").strip()
+    if env:
+        return norm_path(env, base=_instance_dir())
+    return _schedules_dir() / "retrain.yaml"
+
+def _timestamps_file() -> Path:
+    env = (os.getenv("RETRAIN_TIMESTAMPS_FILE") or "").strip()
+    if env:
+        return norm_path(env, base=_instance_dir())
+    return _schedules_dir() / "retrain.timestamps.json"
+
+def _portfolio_file() -> Path:
+    env = (os.getenv("PORTFOLIO_FILE") or "").strip()
+    if env:
+        return norm_path(env, base=_instance_dir())
+    return _instance_dir() / "portfolio" / "top10.yaml"
 
 def _norm_key(symbol: str | None, timeframe: str | None) -> str:
     s = (symbol or "").strip().upper()
     tf = (timeframe or "").strip().upper()
     return f"{s}:{tf}" if s and tf else ""
 
-def _load_last_runs() -> dict[str, float]:
-    """Lê timestamps por (symbol,timeframe) de JSON: { "BTCUSDT:H2": 1729099200, ... }"""
-    p = _timestamps_file()
-    try:
-        if p.exists():
-            data = json.loads(p.read_text(encoding="utf-8"))
-            out: dict[str, float] = {}
-            for k, v in (data or {}).items():
-                if isinstance(v, (int, float)):
-                    out[str(k).strip().upper()] = float(v)
-            return out
-    except Exception:
-        pass
-    return {}
+def _instance_paths() -> Dict[str, str]:
+    bridge_url = (os.getenv("BRIDGE_URL") or os.getenv("BRIDGE_REAL") or os.getenv("BRIDGE_ENV") or "").strip()
+    ui_url = (os.getenv("UI_URL") or "").strip()
+    return {
+        "iid": _iid(),
+        "bridge_url": bridge_url,
+        "ui_url": ui_url,
+        "project_root": str(project_root()),
+        "apps_root": str(_apps_root()),
+        "live_root": str(_live_root()),
+        "instance_dir": str(_instance_dir()),
+        "configs_dir": str(_configs_dir()),
+        "models_root": str(_models_root()),
+        "signals_dir": str(_signals_dir()),
+        "pids_dir": str(_pids_dir()),
+        "metrics_dir": str(_metrics_dir()),
+        "schedules_dir": str(_schedules_dir()),
+        "policies_dir": str(_policies_dir()),
+        "logs_dir": str(_logs_dir()),
+    }
+
+# ===================================================
+# Helpers gerais
+# ===================================================
 
 def _run(cmd: list[str] | str, cwd: Optional[Path] = None, env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     shell = isinstance(cmd, str)
     _env = (env or os.environ).copy()
-    # Força UTF-8 (Windows) para não estragar acentos
     _env.setdefault("PYTHONUTF8", "1")
     _env.setdefault("PYTHONIOENCODING", "utf-8")
     try:
@@ -107,15 +192,6 @@ def _run(cmd: list[str] | str, cwd: Optional[Path] = None, env: Optional[Dict[st
     except Exception as e:
         return {"rc": -1, "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
 
-def _portfolio_file() -> Path:
-    env = os.getenv("PORTFOLIO_FILE")
-    if env:
-        return Path(env)
-    return _apps_root() / "outputs" / "live" / "portfolio" / "top10.yaml"
-
-def _retrain_yaml_file() -> Path:
-    return _schedule_file()
-
 def _read_yaml_safe(p: Path) -> dict:
     try:
         import yaml  # type: ignore
@@ -123,19 +199,31 @@ def _read_yaml_safe(p: Path) -> dict:
     except Exception:
         return {}
 
-# --- State files (governor/promoter) ---
-def _state_dir() -> Path:
-    return _apps_root() / "outputs" / "live" / "state"
+def _safe_join(base: Path, name: str) -> Path:
+    p = (base / Path(name).name).resolve()
+    base_res = base.resolve()
+    if not str(p).startswith(str(base_res)):
+        raise HTTPException(status_code=400, detail="invalid path")
+    return p
 
-def _read_json_safe(p: Path) -> dict:
+def _load_last_runs() -> dict[str, float]:
+    p = _timestamps_file()
     try:
         if p.exists():
-            return json.loads(p.read_text(encoding="utf-8")) or {}
+            data = json.loads(p.read_text(encoding="utf-8"))
+            out: dict[str, float] = {}
+            for k, v in (data or {}).items():
+                if isinstance(v, (int, float)):
+                    out[str(k).strip().upper()] = float(v)
+            return out
     except Exception:
         pass
     return {}
 
-# ================== Helpers de processos (psutil) ==================
+# ===================================================
+# psutil process helpers
+# ===================================================
+
 def _ps():
     try:
         import psutil  # type: ignore
@@ -143,94 +231,17 @@ def _ps():
     except Exception:
         return None
 
-def _file_age_min(path: Path) -> Optional[float]:
-    try:
-        return round((time.time() - path.stat().st_mtime) / 60.0, 1)
-    except Exception:
-        return None
-
-# PID dirs e candidatos (pids/ e runs/)
-PID_DIR_PIDS = _apps_root() / "outputs" / "live" / "pids"
-PID_DIR_RUNS = _apps_root() / "outputs" / "live" / "runs"
-
-# --- PID readers simples (compat com nomes .pid) -------------------
-def _read_pid(name: str) -> Optional[int]:
-    """
-    Lê um PID por nome de ficheiro (ex.: 'mlsl-executor.pid') procurando
-    em outputs/live/pids e outputs/live/runs.
-    """
-    for base in (PID_DIR_PIDS, PID_DIR_RUNS):
+def _read_pid_any(names: List[str]) -> Optional[int]:
+    base = _pids_dir()
+    for name in names:
         p = base / name
         try:
             if p.exists():
-                t = p.read_text(encoding="utf-8").strip()
+                t = p.read_text(encoding="utf-8", errors="replace").strip()
                 if t.isdigit():
                     return int(t)
         except Exception:
             pass
-    return None
-
-# --- métricas de um PID (forma curta usada no /status) -------------
-def _proc_info(pid: Optional[int]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"pid": None, "cpu_s": None, "mem_mb": None, "uptime_s": None}
-    if not pid:
-        return out
-    ps = _ps()
-    if not ps:
-        return out
-    try:
-        p = ps.Process(pid)
-        with p.oneshot():
-            ct = p.cpu_times()
-            mem = p.memory_info()
-            out["pid"] = pid
-            out["cpu_s"] = round((ct.user + ct.system), 1) if ct else None
-            out["mem_mb"] = round(mem.rss / (1024*1024), 1) if mem else None
-            out["uptime_s"] = max(0.0, time.time() - (p.create_time() or time.time()))
-    except Exception:
-        pass
-    return out
-
-def _pid_candidates(role: str) -> List[Path]:
-    r = role.strip().lower()
-    cands: List[Path] = []
-    if r == "executor":
-        cands += [
-            PID_DIR_PIDS / "mlsl-executor.pid",
-            PID_DIR_RUNS / "executor.pid",
-            PID_DIR_RUNS / "mlsl-executor.pid",
-            PID_DIR_RUNS / "services.executor.pid",
-        ]
-    elif r in ("retrain", "scheduler", "scheduler_retrain"):
-        cands += [
-            PID_DIR_PIDS / "mlsl-retrain.pid",
-            PID_DIR_RUNS / "retrain.pid",
-            PID_DIR_RUNS / "scheduler_retrain.pid",
-            PID_DIR_RUNS / "mlsl-retrain.pid",
-        ]
-    elif r == "watcher":
-        cands += [
-            PID_DIR_PIDS / "mlsl-watcher.pid",
-            PID_DIR_RUNS / "watcher.pid",
-            PID_DIR_RUNS / "mlsl-watcher.pid",
-        ]
-    elif r == "emitter":
-        cands += [
-            PID_DIR_PIDS / "mlsl-emitter.pid",
-            PID_DIR_RUNS / "emitter.pid",
-            PID_DIR_RUNS / "mlsl-emitter.pid",
-        ]
-    return cands
-
-def _read_pid_multi(role: str) -> Optional[int]:
-    for p in _pid_candidates(role):
-        try:
-            if p.exists():
-                t = p.read_text(encoding="utf-8").strip()
-                if t.isdigit():
-                    return int(t)
-        except Exception:
-            continue
     return None
 
 def _proc_from_pid(pid: Optional[int]):
@@ -243,7 +254,6 @@ def _proc_from_pid(pid: Optional[int]):
         return None
 
 def _find_proc(needles: List[str]):
-    """Procura por cmdline se não houver pidfile."""
     ps = _ps()
     if not ps:
         return None
@@ -258,37 +268,13 @@ def _find_proc(needles: List[str]):
             continue
     return None
 
-def _proc_metrics(p) -> Dict[str, Any]:
-    ps = _ps()
-    if not ps or not p:
-        return {}
-    try:
-        ct = p.cpu_times()
-        mem = p.memory_info()
-        return {
-            "pid": p.pid,
-            "cpu_s": round((ct.user + ct.system), 1) if ct else None,
-            "mem_mb": round(mem.rss / (1024*1024), 1) if mem else None,
-            "uptime_s": max(0.0, time.time() - (p.create_time() or time.time())),
-        }
-    except Exception:
-        return {}
-
-def _fresh_from_log_or_pid(age_min: Optional[float], max_age_min: float, has_pid: bool) -> bool:
-    # Se há log recente, usa-o. Se não há log, considera vivo se houver PID.
-    if age_min is not None:
-        return age_min <= max_age_min
-    return has_pid
-
 def _is_wrapper_name(name: str | None) -> bool:
     if not name:
         return False
     n = name.lower()
-    return any(x in n for x in ("pwsh", "powershell", "cmd.exe", "cmd", "conhost"))
+    return any(x in n for x in ("pwsh", "powershell", "cmd.exe", "cmd", "conhost", "start.exe", "wine"))
 
 def _promote_to_child_with_needles(p, needles: List[str]):
-    """Se p for um wrapper (pwsh/powershell/cmd), procura um filho Python que
-    contenha alguma das 'needles' na cmdline. Caso encontre, devolve o filho."""
     ps = _ps()
     if not ps or not p:
         return p
@@ -298,6 +284,7 @@ def _promote_to_child_with_needles(p, needles: List[str]):
         name = None
     if not _is_wrapper_name(name):
         return p
+
     needles_lc = [n.lower() for n in needles if n]
     try:
         for ch in p.children(recursive=True):
@@ -312,12 +299,6 @@ def _promote_to_child_with_needles(p, needles: List[str]):
     return p
 
 def _locate_proc(pid: Optional[int], needles: List[str]):
-    """
-    Tenta localizar o processo real:
-    1) pelo PID (pidfile);
-    2) se não existir, por cmdline (needles);
-    3) se for um wrapper (pwsh/powershell/cmd), promove para o filho Python.
-    """
     p = _proc_from_pid(pid)
     if not p:
         p = _find_proc(needles)
@@ -325,35 +306,38 @@ def _locate_proc(pid: Optional[int], needles: List[str]):
         p = _promote_to_child_with_needles(p, needles)
     return p
 
-# === util partilhado: join seguro ==================================
-def _safe_join(base: Path, name: str) -> Path:
-    """
-    Join `name` to `base` safely (no traversal). Only basename is honored.
-    """
-    p = (base / Path(name).name).resolve()
-    base_res = base.resolve()
-    if not str(p).startswith(str(base_res)):
-        raise HTTPException(status_code=400, detail="invalid path")
-    return p
+def _proc_metrics(p) -> Dict[str, Any]:
+    ps = _ps()
+    if not ps or not p:
+        return {"pid": None, "cpu_s": None, "mem_mb": None, "uptime_s": None}
+    try:
+        ct = p.cpu_times()
+        mem = p.memory_info()
+        return {
+            "pid": p.pid,
+            "cpu_s": round((ct.user + ct.system), 1) if ct else None,
+            "mem_mb": round(mem.rss / (1024 * 1024), 1) if mem else None,
+            "uptime_s": max(0.0, time.time() - (p.create_time() or time.time())),
+        }
+    except Exception:
+        return {"pid": None, "cpu_s": None, "mem_mb": None, "uptime_s": None}
 
-# ================== MÉTRICAS via CSV (proc_monitor) =================
+# ===================================================
+# Metrics CSV (proc_monitor)
+# ===================================================
 
 def _metrics_csv() -> Path:
-    env = os.getenv("PROC_METRICS_FILE")
+    env = (os.getenv("PROC_METRICS_FILE") or "").strip()
     if env:
-        return Path(env)
-    return _apps_root() / "outputs" / "live" / "metrics" / "proc_metrics.csv"
+        return norm_path(env, base=_metrics_dir())
+    return _metrics_dir() / "proc_metrics.csv"
 
 def _last_metrics_for(service: str) -> Dict[str, Any]:
-    """
-    Lê o último registo de métricas para um dado 'service' a partir do
-    proc_metrics.csv gerado pelo tools.proc_monitor.
-    """
     path = _metrics_csv()
     if not path.exists():
         return {}
     try:
-        import csv  # lazy import para não falhar se faltar
+        import csv
         with path.open("r", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
         if not rows:
@@ -361,6 +345,7 @@ def _last_metrics_for(service: str) -> Dict[str, Any]:
         for row in reversed(rows):
             if (row.get("service") or "").strip().lower() != service.strip().lower():
                 continue
+
             def _to_int(key: str) -> Optional[int]:
                 v = (row.get(key) or "").strip()
                 if not v:
@@ -369,6 +354,7 @@ def _last_metrics_for(service: str) -> Dict[str, Any]:
                     return int(float(v))
                 except Exception:
                     return None
+
             def _to_float(key: str) -> Optional[float]:
                 v = (row.get(key) or "").strip()
                 if not v:
@@ -377,6 +363,7 @@ def _last_metrics_for(service: str) -> Dict[str, Any]:
                     return float(v)
                 except Exception:
                     return None
+
             return {
                 "pid": _to_int("pid"),
                 "cpu_pct": _to_float("cpu_pct"),
@@ -390,9 +377,10 @@ def _last_metrics_for(service: str) -> Dict[str, Any]:
     except Exception:
         return {}
 
-# ---------------------------------------------------
+# ===================================================
 # Retrain controlado pela UI (NO-EMIT)
-# ---------------------------------------------------
+# ===================================================
+
 def _retrain_cmd_args(extra: list[str] | None = None) -> list[str]:
     py = _python_exe()
     args = [py, "-m", "tools.retrain_incremental"]
@@ -404,7 +392,25 @@ def _ui_no_emit_env(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     env = dict(base or os.environ)
     env["MLSL_RETRAIN_NO_EMIT"] = os.getenv("MLSL_RETRAIN_NO_EMIT", "0")
     env["MLSL_RETRAIN_NO_EMIT_UI"] = os.getenv("MLSL_RETRAIN_NO_EMIT_UI", "1")
+
+    # garantir instância correta
+    env.setdefault("INSTANCE_ID", _iid())
+    env.setdefault("MLSL_INSTANCE_ID", _iid())
+    env.setdefault("INSTANCE_DIR", str(_instance_dir()))
+    env.setdefault("CONFIGS_DIR", str(_configs_dir()))
+    env.setdefault("MODELS_ROOT", str(_models_root()))
+    env.setdefault("SIGNALS_DIR", str(_signals_dir()))
+    env.setdefault("RETRAIN_SCHEDULE_FILE", str(_schedule_file()))
+    env.setdefault("RETRAIN_TIMESTAMPS_FILE", str(_timestamps_file()))
     return env
+
+# ===================================================
+# API
+# ===================================================
+
+@router.get("/env")
+def env_info():
+    return _instance_paths()
 
 @router.post("/retrain_run_all")
 def retrain_run_all():
@@ -466,24 +472,18 @@ def retrain_rebuild():
     })
 
 # ---------------------------------------------------
-# Dados p/ Dashboard
+# Dashboard helpers
 # ---------------------------------------------------
-LOGS_DIR  = _logs_dir()
 
 def _log_age_min(path: Path) -> Optional[float]:
     try:
         if not path.exists():
             return None
-        return round((time.time() - path.stat().st_mtime)/60.0, 1)
+        return round((time.time() - path.stat().st_mtime) / 60.0, 1)
     except Exception:
         return None
 
 def _log_age_min_multi(base: Path, names: list[str]) -> tuple[Optional[float], Optional[str]]:
-    """
-    Devolve (age_min, file_used) do primeiro ficheiro existente em 'names'
-    (ordem de prioridade) calculado a partir de 'base'. Se nenhum existir,
-    devolve (None, None).
-    """
     for name in names:
         p = base / name
         age = _log_age_min(p)
@@ -491,28 +491,12 @@ def _log_age_min_multi(base: Path, names: list[str]) -> tuple[Optional[float], O
             return age, str(p)
     return None, None
 
-STATE_DIR = _state_dir()
-
-def _read_state_json(name: str) -> dict:
-    """Lê um ficheiro de estado JSON do outputs/live/state (ex: promoter-state.json)."""
-    try:
-        p = STATE_DIR / name
-        if not p.exists():
-            return {}
-        data = json.loads(p.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-    return {}
-
 @router.get("/status")
 def status():
     # ---------- BRIDGE ----------
     bridge_ok = False
     bridge_diag: Dict[str, Any] | None = None
     try:
-        from app.shareweb import get_service
         svc = get_service()
         diag = svc.diag() if svc else {"ok": False, "reason": "svc_missing"}
         bridge_diag = diag
@@ -520,8 +504,10 @@ def status():
     except Exception as e:
         bridge_diag = {"ok": False, "reason": f"diag_failed: {e}"}
 
-    # tenta primeiro por pidfile; cai para cmdline; promove se for wrapper
-    bridge_pid = _read_pid("mlsl-bridge.pid")
+    logs_dir = _logs_dir()
+
+    # ---------- BRIDGE backend (uvicorn) ----------
+    bridge_pid = _read_pid_any(["bridge_backend.pid"])
     bridge_needles = [
         "uvicorn app.main:app",
         "uvicorn app.main",
@@ -530,149 +516,121 @@ def status():
         "app\\main.py",
     ]
     bp = _locate_proc(bridge_pid, bridge_needles) or _find_proc(bridge_needles)
+    bmet = _proc_metrics(bp)
 
-    def _pmet(p): return _proc_metrics(p) if p else {"pid": None, "cpu_s": None, "mem_mb": None, "uptime_s": None}
-    bmet = _pmet(bp)
+    # ---------- BRIDGE UI (se existir) ----------
+    ui_pid = _read_pid_any(["bridge_ui.pid"])
+    ui_needles = ["bridge_ui", "ui_server", "app.ui"]
+    up = _locate_proc(ui_pid, ui_needles) or _find_proc(ui_needles)
+    umet = _proc_metrics(up)
 
-    # CSV metrics override (proc_monitor)
-    bcsv = _last_metrics_for("bridge")
-    if bcsv:
-        bmet["pid"] = bcsv.get("pid") or bmet.get("pid")
-        # não temos cpu_s no CSV, mas temos cpu_pct se quiseres usar no futuro
-        bmet["mem_mb"] = bcsv.get("mem_mb") or bmet.get("mem_mb")
-        bmet["uptime_s"] = bcsv.get("uptime_s") or bmet.get("uptime_s")
+    # ---------- STRATEGY ENGINE ----------
+    se_pid = _read_pid_any(["strategy_engine.pid"])
+    se_needles = ["services.strategy_engine", "strategy_engine", "strategy-engine"]
+    sp = _locate_proc(se_pid, se_needles) or _find_proc(se_needles)
+    smet = _proc_metrics(sp)
+    se_age, se_file = _log_age_min_multi(
+        logs_dir,
+        ["strategy_engine.log", "strategy_engine.stdout.log", "strategy_engine.stderr.log"],
+    )
+    se_fresh = bool(smet.get("pid")) or (se_age is not None and se_age <= 5)
 
-    # --- EXECUTOR ---
-    exec_pid = _read_pid("mlsl-executor.pid") or _read_pid_multi("executor")
+    # ---------- EXECUTOR ----------
+    exec_pid = _read_pid_any(["executor.pid"])
     exec_needles = ["services.executor.loop", "executor.loop", "run_execute_live_mt5"]
-    pe = _locate_proc(exec_pid, exec_needles)
-    exec_info = _pmet(pe)
-    exec_csv = _last_metrics_for("executor")
-    if exec_csv:
-        exec_info["pid"] = exec_csv.get("pid") or exec_info.get("pid")
-        exec_info["mem_mb"] = exec_csv.get("mem_mb") or exec_info.get("mem_mb")
-        exec_info["uptime_s"] = exec_csv.get("uptime_s") or exec_info.get("uptime_s")
+    pe = _locate_proc(exec_pid, exec_needles) or _find_proc(exec_needles)
+    exec_info = _proc_metrics(pe)
     exec_age, exec_file = _log_age_min_multi(
-        LOGS_DIR,
-        ["executor.log", "executor.stdout.log", "executor.stderr.log"]
+        logs_dir,
+        ["executor.log", "executor.stdout.log", "executor.stderr.log"],
     )
-    exec_fresh = (exec_age is not None) and (exec_age <= float(os.getenv("EXEC_FRESH_MAX_AGE_MIN","5")))
+    exec_fresh = bool(exec_info.get("pid")) or (
+        exec_age is not None and exec_age <= float(os.getenv("EXEC_FRESH_MAX_AGE_MIN", "5"))
+    )
 
-    # --- RETRAIN ---
-    retr_pid = _read_pid("mlsl-retrain.pid") or _read_pid_multi("retrain")
-    retr_needles = [
-        "services.retrain",
-        "services.scheduler_retrain",
-        "scheduler_retrain",
-        "tools.retrain_incremental",
+    # ---------- RETRAIN ----------
+    retr_pid = _read_pid_any(["retrain.pid"])
+    retr_needles = ["services.retrain", "scheduler_retrain", "tools.retrain_incremental"]
+    pr = _locate_proc(retr_pid, retr_needles) or _find_proc(retr_needles)
+    retr_info = _proc_metrics(pr)
+    retr_age, retr_file = _log_age_min_multi(
+        logs_dir,
+        ["retrain.log", "scheduler_retrain.log", "scheduler_retrain.stdout.log", "scheduler_retrain.stderr.log"],
+    )
+    retr_fresh = bool(retr_info.get("pid")) or (
+        retr_age is not None and retr_age <= float(os.getenv("SCHED_FRESH_MAX_AGE_MIN", "10"))
+    )
+
+    # ---------- WATCHER ----------
+    watch_pid = _read_pid_any(["watcher.pid"])
+    watch_needles = [
+        "services.monitoring.watch_signals",
+        "-m services.monitoring.watch_signals",
+        "watch_signals",
     ]
-    pr = _locate_proc(retr_pid, retr_needles)
-    retr_info = _pmet(pr)
-    retr_age, retr_file = _log_age_min_multi(
-        _logs_dir(),
-        ["retrain.log", "scheduler_retrain.log", "scheduler_retrain.stdout.log", "scheduler_retrain.stderr.log"]
-    )
-    retr_fresh = (retr_age is not None) and (retr_age <= float(os.getenv("SCHED_FRESH_MAX_AGE_MIN","10")))
-    retr_info = _pmet(pr)
-    retr_csv = _last_metrics_for("retrain")
-    if retr_csv:
-        retr_info["pid"] = retr_csv.get("pid") or retr_info.get("pid")
-        retr_info["mem_mb"] = retr_csv.get("mem_mb") or retr_info.get("mem_mb")
-        retr_info["uptime_s"] = retr_csv.get("uptime_s") or retr_info.get("uptime_s")
-    retr_age, retr_file = _log_age_min_multi(
-        LOGS_DIR,
-        ["scheduler_retrain.log", "scheduler_retrain.stdout.log", "scheduler_retrain.stderr.log"]
-    )
-    retr_fresh = (retr_age is not None) and (retr_age <= float(os.getenv("SCHED_FRESH_MAX_AGE_MIN","10")))
-
-    # --- WATCHER ---
-    watch_pid = _read_pid_multi("watcher")
-    watch_needles = ["tools.watch_signals", "watch_signals.py", "watcher"]
     wp = _locate_proc(watch_pid, watch_needles) or _find_proc(watch_needles)
-    wmet = _pmet(wp)
-    wcsv = _last_metrics_for("watcher")
-    if wcsv:
-        wmet["pid"] = wcsv.get("pid") or wmet.get("pid")
-        wmet["mem_mb"] = wcsv.get("mem_mb") or wmet.get("mem_mb")
-        wmet["uptime_s"] = wcsv.get("uptime_s") or wmet.get("uptime_s")
+    wmet = _proc_metrics(wp)
     watch_age, watch_file = _log_age_min_multi(
-        LOGS_DIR,
-        ["watch_signals.log", "watch_signals.stdout.log", "watch_signals.stderr.log"]
+        logs_dir,
+        ["watch_signals.log", "watch_signals.stdout.log", "watch_signals.stderr.log"],
     )
-    watch_fresh = bool(wmet.get("pid")) or (watch_age is not None and watch_age <= int(os.getenv("WATCH_FRESH_MAX_AGE_MIN","5")))
+    watch_fresh = bool(wmet.get("pid")) or (
+        watch_age is not None and watch_age <= int(os.getenv("WATCH_FRESH_MAX_AGE_MIN", "5"))
+    )
 
-    # --- EMITTER ---
-    emit_pid = _read_pid("mlsl-emitter.pid") or _read_pid_multi("emitter")
-    emit_needles = ["services.emitter.loop", "emitter.loop"]
+    # ---------- EMITTER ----------
+    emit_pid = _read_pid_any(["emitter.pid"])
+    emit_needles = [
+        "services.emitter.loop",
+        "-m services.emitter.loop",
+        "emitter/loop.py",
+        "emitter.loop",
+    ]
     ep = _locate_proc(emit_pid, emit_needles) or _find_proc(emit_needles)
-    emet = _pmet(ep)
-    ecsv = _last_metrics_for("emitter")
-    if ecsv:
-        emet["pid"] = ecsv.get("pid") or emet.get("pid")
-        emet["mem_mb"] = ecsv.get("mem_mb") or emet.get("mem_mb")
-        emet["uptime_s"] = ecsv.get("uptime_s") or emet.get("uptime_s")
+    emet = _proc_metrics(ep)
     emitter_age, emitter_file = _log_age_min_multi(
-        LOGS_DIR,
-        ["emitter.log", "emitter.stdout.log", "emitter.stderr.log"]
+        logs_dir,
+        ["emitter.log", "emitter.stdout.log", "emitter.stderr.log"],
     )
-    emitter_fresh = bool(emet.get("pid")) or (emitter_age is not None and emitter_age <= int(os.getenv("EMITTER_FRESH_MAX_AGE_MIN","5")))
-
-    # --- GOVERNOR ---
-    gov_pid = _read_pid("mlsl-governor.pid")
-    gov_needles = ["tools.asset_governor", "asset_governor.py", "governor loop"]
-    pg = _locate_proc(gov_pid, gov_needles) or _find_proc(gov_needles)
-    gov_info = _pmet(pg)
-    gcsv = _last_metrics_for("governor")
-    if gcsv:
-        gov_info["pid"] = gcsv.get("pid") or gov_info.get("pid")
-        gov_info["mem_mb"] = gcsv.get("mem_mb") or gov_info.get("mem_mb")
-        gov_info["uptime_s"] = gcsv.get("uptime_s") or gov_info.get("uptime_s")
-    gov_age, gov_file = _log_age_min_multi(
-        LOGS_DIR, ["governor.log","asset_governor.log","governor.stdout.log","governor.stderr.log"]
+    emitter_fresh = bool(emet.get("pid")) or (
+        emitter_age is not None and emitter_age <= int(os.getenv("EMITTER_FRESH_MAX_AGE_MIN", "5"))
     )
-    gov_fresh = bool(gov_info.get("pid")) or (gov_age is not None and gov_age <= int(os.getenv("GOV_FRESH_MAX_AGE_MIN","15")))
 
-    # ler governor-state.json (min_pf/top_k/itens)
-    gov_state = _read_json_safe(_state_dir() / "governor-state.json")
-    gov_items = gov_state.get("items") or []
-    gov_selected = len(gov_items)
-    gov_topk = gov_state.get("top_k") or gov_state.get("selection",{}).get("top_k")
-    gov_min_pf = (gov_state.get("selection") or {}).get("min_pf")
-
-    # --- PROMOTER ---
-    pro_pid = _read_pid("mlsl-promoter.pid")
-    pro_needles = ["tools.promote_model","promote_model.py","promoter loop"]
-    pp = _locate_proc(pro_pid, pro_needles) or _find_proc(pro_needles)
-    pro_info = _pmet(pp)
-    pcsv = _last_metrics_for("promoter")
-    if pcsv:
-        pro_info["pid"] = pcsv.get("pid") or pro_info.get("pid")
-        pro_info["mem_mb"] = pcsv.get("mem_mb") or pro_info.get("mem_mb")
-        pro_info["uptime_s"] = pcsv.get("uptime_s") or pro_info.get("uptime_s")
-    pro_age, pro_file = _log_age_min_multi(
-        LOGS_DIR, ["promoter.log","promote.log","promoter.stdout.log","promoter.stderr.log"]
+    # ---------- MONITOR ----------
+    mon_pid = _read_pid_any(["monitor.pid"])
+    mon_needles = ["services.monitor", "proc_monitor", "monitor.loop"]
+    mp = _locate_proc(mon_pid, mon_needles) or _find_proc(mon_needles)
+    mmet = _proc_metrics(mp)
+    mon_age, mon_file = _log_age_min_multi(
+        logs_dir,
+        ["monitor.log", "proc_monitor.log", "proc_monitor.stdout.log", "proc_monitor.stderr.log"],
     )
-    pro_fresh = bool(pro_info.get("pid")) or (pro_age is not None and pro_age <= int(os.getenv("PROMO_FRESH_MAX_AGE_MIN","30")))
+    mon_fresh = bool(mmet.get("pid")) or (mon_age is not None and mon_age <= 5)
 
-    # ler promoter-state.json (scan_every_min/require_model_ok)
-    pro_state = _read_json_safe(_state_dir() / "promoter-state.json")
-    scan_every_min = pro_state.get("scan_every_min")
-    require_model_ok = pro_state.get("require_model_ok")
+    # ---------- POSITION MANAGER (sem CSV) ----------
+    pm_pid = _read_pid_any(["position_manager.pid"])
+    pm_needles = ["services.risk.position_manager", "-m services.risk.position_manager", "position_manager.py"]
+    pp = _locate_proc(pm_pid, pm_needles) or _find_proc(pm_needles)
+    pm_met = _proc_metrics(pp)
 
-    # --- POSITION MANAGER (novo no status principal) ---
-    pm_csv = _last_metrics_for("position_manager")
-    pm_pid = pm_csv.get("pid") if pm_csv else None
+    pm_age, pm_file = _log_age_min_multi(
+        logs_dir,
+        ["position_manager.log", "position_manager.stdout.log", "position_manager.stderr.log"],
+    )
+    pm_fresh = bool(pm_met.get("pid")) or (pm_age is not None and pm_age <= 5)
+
     pm_info = {
-        "pid": pm_pid,
-        "cpu_s": None,  # não temos cpu_s no CSV
-        "mem_mb": pm_csv.get("mem_mb") if pm_csv else None,
-        "uptime_s": pm_csv.get("uptime_s") if pm_csv else None,
-        "log_age_min": None,
-        "fresh": bool(pm_pid),
-        "log_file": None,
+        "pid": pm_met.get("pid"),
+        "cpu_s": pm_met.get("cpu_s"),
+        "mem_mb": pm_met.get("mem_mb"),
+        "uptime_s": pm_met.get("uptime_s"),
+        "log_age_min": pm_age,
+        "log_file": pm_file,
+        "fresh": pm_fresh,
     }
 
     return {
+        "env": _instance_paths(),
         "bridge": {
             "ok": bridge_ok,
             "diag": bridge_diag,
@@ -680,6 +638,21 @@ def status():
             "cpu_s": bmet.get("cpu_s"),
             "mem_mb": bmet.get("mem_mb"),
             "uptime_s": bmet.get("uptime_s"),
+        },
+        "bridge_ui": {
+            "pid": umet.get("pid"),
+            "cpu_s": umet.get("cpu_s"),
+            "mem_mb": umet.get("mem_mb"),
+            "uptime_s": umet.get("uptime_s"),
+        },
+        "strategy_engine": {
+            "pid": smet.get("pid"),
+            "cpu_s": smet.get("cpu_s"),
+            "mem_mb": smet.get("mem_mb"),
+            "uptime_s": smet.get("uptime_s"),
+            "log_age_min": se_age,
+            "log_file": se_file,
+            "fresh": se_fresh,
         },
         "executor": {
             "pid": exec_info.get("pid"),
@@ -718,47 +691,21 @@ def status():
             "fresh": emitter_fresh,
             "log_file": emitter_file,
         },
-        "governor": {
-            "pid": gov_info.get("pid"),
-            "cpu_s": gov_info.get("cpu_s"),
-            "mem_mb": gov_info.get("mem_mb"),
-            "uptime_s": gov_info.get("uptime_s"),
-            "log_age_min": gov_age,
-            "fresh": gov_fresh,
-            "log_file": gov_file,
-            # novos:
-            "selected_assets": gov_items,
-            "top_k": gov_topk,
-            "min_pf": gov_min_pf,
-        },
-        "promoter": {
-            "pid": pro_info.get("pid"),
-            "cpu_s": pro_info.get("cpu_s"),
-            "mem_mb": pro_info.get("mem_mb"),
-            "uptime_s": pro_info.get("uptime_s"),
-            "log_age_min": pro_age,
-            "fresh": pro_fresh,
-            "log_file": pro_file,
-            # novos:
-            "scan_every_min": scan_every_min,
-            "require_model_ok": require_model_ok,
+        "monitor": {
+            "pid": mmet.get("pid"),
+            "cpu_s": mmet.get("cpu_s"),
+            "mem_mb": mmet.get("mem_mb"),
+            "uptime_s": mmet.get("uptime_s"),
+            "log_age_min": mon_age,
+            "log_file": mon_file,
+            "fresh": mon_fresh,
         },
         "position_manager": pm_info,
     }
 
-# --- colar no app/ui/routes/api_dash.py (substitui o def strategies) ---
-def _configs_dir() -> Path:
-    env = os.getenv("CONFIGS_DIR")
-    if env:
-        return Path(env)
-    return _apps_root() / "outputs" / "live" / "configs"
-
-def _yaml_safe(p: Path):
-    try:
-        import yaml
-        return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
+# ---------------------------------------------------
+# Strategies (schedule + configs)  <-- (isto é o que te faltou na UI)
+# ---------------------------------------------------
 
 @router.get("/strategies")
 def strategies(include: str = Query("schedule", description="schedule|configs|both")):
@@ -770,14 +717,13 @@ def strategies(include: str = Query("schedule", description="schedule|configs|bo
     rows: list[dict[str, Any]] = []
     scheduled_keys: set[str] = set()
 
-    # 1) Sempre: ler o schedule
+    # 1) schedule (jobs)
     if path.exists():
         try:
-            import yaml
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            data = _read_yaml_safe(path) or {}
             for j in (data or {}).get("jobs", []):
                 sym = j.get("symbol") or j.get("mt5_symbol") or j.get("instrument")
-                tf  = j.get("timeframe")
+                tf = j.get("timeframe")
                 win = j.get("retrain_every_minutes")
                 key = _norm_key(sym, tf)
                 scheduled_keys.add(key)
@@ -795,19 +741,18 @@ def strategies(include: str = Query("schedule", description="schedule|configs|bo
         except Exception:
             rows = []
 
-    # 2) Opcional: incluir órfãos do diretório de configs
+    # 2) configs órfãos
     if "configs" in include_set or "both" in include_set:
         cfg_dir = _configs_dir()
         for p in sorted(cfg_dir.glob("*_config.yaml")):
-            # inferir symbol/timeframe a partir do nome
-            stem = p.stem  # ex: XAUUSD_M15_config
+            stem = p.stem  # XAUUSD_H1_config
             base = stem[:-7] if stem.endswith("_config") else stem
             if "_" not in base:
                 continue
             sym, tf = base.split("_", 1)
             key = _norm_key(sym, tf)
             if key in scheduled_keys:
-                continue  # já está no schedule
+                continue
             rows.append({
                 "symbol": sym,
                 "timeframe": tf,
@@ -820,7 +765,7 @@ def strategies(include: str = Query("schedule", description="schedule|configs|bo
                 "source_url": None,
             })
 
-    # 3) Enriquecer last_run/next_in para os do schedule
+    # 3) last_run / due / next_in
     last_map = _load_last_runs()
     now = time.time()
     for r in rows:
@@ -828,16 +773,18 @@ def strategies(include: str = Query("schedule", description="schedule|configs|bo
             continue
         key = _norm_key(r.get("symbol"), r.get("timeframe"))
         last_ts = last_map.get(key)
+
         if not last_ts:
             latest_dir = _models_latest_dir(r.get("symbol"), r.get("timeframe"))
             if latest_dir.exists():
                 try:
                     last_ts = max(
-                        (f.stat().st_mtime for f in latest_dir.rglob('*') if f.is_file()),
-                        default=None
+                        (f.stat().st_mtime for f in latest_dir.rglob("*") if f.is_file()),
+                        default=None,
                     )
                 except Exception:
                     last_ts = None
+
         if last_ts:
             last_min = int((now - float(last_ts)) // 60)
             r["last_run_min"] = max(0, last_min)
@@ -856,86 +803,71 @@ def schedule_yaml():
         return PlainTextResponse("retrain.yaml não encontrado", status_code=404)
     return PlainTextResponse(p.read_text(encoding="utf-8"))
 
+@router.get("/view_schedule")
+def view_schedule():
+    p = _schedule_file()
+    if not p.exists():
+        return PlainTextResponse("retrain.yaml não encontrado", status_code=404)
+    return PlainTextResponse(p.read_text(encoding="utf-8"))
+
+@router.get("/view_config")
+def view_config(file: str):
+    base = _configs_dir()
+    p = _safe_join(base, file)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="config não encontrado")
+    try:
+        txt = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        txt = p.read_text(encoding="latin-1", errors="replace")
+    return PlainTextResponse(txt)
+
+# ---------------------------------------------------
+# State endpoints (legacy UI calls)
+# ---------------------------------------------------
+
 @router.get("/executor_state")
 def executor_state():
-    # fresh por idade de log (com fallbacks)
+    logs = _logs_dir()
     fresh_min = int(os.getenv("EXEC_FRESH_MAX_AGE_MIN", "5"))
-    age_min, used = _log_age_min_multi(
-        LOGS_DIR,
-        ["executor.log", "executor.stdout.log", "executor.stderr.log"]
-    )
-    fresh = (age_min is not None) and (age_min <= fresh_min)
-
-    # métricas a partir do CSV (proc_monitor)
+    age_min, used = _log_age_min_multi(logs, ["executor.log", "executor.stdout.log", "executor.stderr.log"])
     m = _last_metrics_for("executor")
-    pid = m.get("pid")
     return {
-        "fresh": fresh if age_min is not None else bool(pid),
+        "fresh": (age_min is not None and age_min <= fresh_min) if age_min is not None else bool(m.get("pid")),
         "age_min": age_min,
         "log_file": used,
         "last_signal_ts": None,
-        "pid": pid,
-        "cpu_s": None,  # não temos cpu_s no CSV
+        "pid": m.get("pid"),
+        "cpu_s": None,
         "mem_mb": m.get("mem_mb"),
         "uptime_s": m.get("uptime_s"),
     }
 
 @router.get("/scheduler_state")
 def scheduler_state():
-    """
-    Estado do scheduler/retrain, usando:
-      - idade dos logs (retrain.log / scheduler_retrain.log)
-      - últimas métricas vistas no proc_metrics.csv (serviço 'retrain')
-    """
+    logs = _logs_dir()
     fresh_min = int(os.getenv("SCHED_FRESH_MAX_AGE_MIN", "10"))
-
-    # Considera tanto retrain.log como os nomes antigos de scheduler
-    age_min, used = _log_age_min_multi(
-        LOGS_DIR,
-        [
-            "retrain.log",                 # novo serviço services.retrain
-            "scheduler_retrain.log",       # nomes antigos, por compat
-            "scheduler_retrain.stdout.log",
-            "scheduler_retrain.stderr.log",
-        ]
-    )
-
-    # Últimas métricas do proc_monitor para o serviço "retrain"
-    m = _last_metrics_for("retrain")  # ex: {"pid": 1234, "mem_mb": 50.1, "uptime_s": 120.0, ...}
-    pid = m.get("pid")
-
-    # locks (se existirem)
-    locks: list[str] = []
-    for lf in [
-        _apps_root() / "outputs" / "live" / "locks" / "scheduler_retrain.lock",
-        _apps_root() / "outputs" / "live" / "scheduler_retrain.lock",
-    ]:
-        if lf.exists():
-            locks.append(str(lf))
-
-    # fresh: se tiver log recente usa idade; se não tiver, cai para "há PID vivo?"
-    fresh = (age_min is not None and age_min <= fresh_min) or bool(pid)
-
+    age_min, used = _log_age_min_multi(logs, ["retrain.log", "scheduler_retrain.log", "scheduler_retrain.stdout.log", "scheduler_retrain.stderr.log"])
+    m = _last_metrics_for("retrain")
+    fresh = (age_min is not None and age_min <= fresh_min) or bool(m.get("pid"))
     return {
         "fresh": fresh,
         "age_min": age_min,
         "log_file": used,
-        "locks": locks,
-        "pid": pid,
-        "cpu_s": None,                      # não temos CPU em segundos no CSV, por isso fica None
+        "locks": [],
+        "pid": m.get("pid"),
+        "cpu_s": None,
         "mem_mb": m.get("mem_mb"),
         "uptime_s": m.get("uptime_s"),
     }
 
 @router.get("/watcher_state")
 def watcher_state():
+    logs = _logs_dir()
     m = _last_metrics_for("watcher")
     pid = m.get("pid")
-    age_min, used = _log_age_min_multi(
-        LOGS_DIR,
-        ["watch_signals.log", "watch_signals.stdout.log", "watch_signals.stderr.log"]
-    )
-    fresh = bool(pid) or (age_min is not None and age_min <= int(os.getenv("WATCH_FRESH_MAX_AGE_MIN","5")))
+    age_min, used = _log_age_min_multi(logs, ["watch_signals.log", "watch_signals.stdout.log", "watch_signals.stderr.log"])
+    fresh = bool(pid) or (age_min is not None and age_min <= int(os.getenv("WATCH_FRESH_MAX_AGE_MIN", "5")))
     return {
         "fresh": fresh,
         "age_min": age_min,
@@ -948,13 +880,11 @@ def watcher_state():
 
 @router.get("/emitter_state")
 def emitter_state():
+    logs = _logs_dir()
     m = _last_metrics_for("emitter")
     pid = m.get("pid")
-    age_min, used = _log_age_min_multi(
-        LOGS_DIR,
-        ["emitter.log", "emitter.stdout.log", "emitter.stderr.log"]
-    )
-    fresh = bool(pid) or (age_min is not None and age_min <= int(os.getenv("EMITTER_FRESH_MAX_AGE_MIN","5")))
+    age_min, used = _log_age_min_multi(logs, ["emitter.log", "emitter.stdout.log", "emitter.stderr.log"])
+    fresh = bool(pid) or (age_min is not None and age_min <= int(os.getenv("EMITTER_FRESH_MAX_AGE_MIN", "5")))
     return {
         "fresh": fresh,
         "age_min": age_min,
@@ -965,52 +895,34 @@ def emitter_state():
         "uptime_s": m.get("uptime_s"),
     }
 
+# ---------------------------------------------------
+# Portfolio
+# ---------------------------------------------------
+
 @router.get("/portfolio")
 def get_portfolio():
-    """JSON para a aba Portfolio na UI."""
     p = _portfolio_file()
     return _read_yaml_safe(p) if p.exists() else {"version": 1, "top": []}
 
-@router.get("/governor_status")
-def governor_status():
-    """Resumo de jobs enabled/disabled a partir do retrain.yaml."""
-    doc = _read_yaml_safe(_retrain_yaml_file())
-    jobs = doc.get("jobs") or []
-    enabled = sum(1 for j in jobs if j.get("enabled"))
-    disabled = sum(1 for j in jobs if not j.get("enabled"))
-    return {"enabled": enabled, "disabled": disabled, "total": len(jobs), "ts": time.time()}
+# ---------------------------------------------------
+# Logs & Failed signals
+# ---------------------------------------------------
 
-@router.post("/jobs/{job_id}/toggle")
-def toggle_job(job_id: str, payload: Dict[str, Any]):
-    """Enable/disable manual de um job no retrain.yaml."""
-    p = _retrain_yaml_file()
-    if not p.exists():
-        raise HTTPException(status_code=404, detail="retrain.yaml não encontrado")
-    import yaml  # type: ignore
-    doc = _read_yaml_safe(p)
-    jobs = doc.get("jobs") or []
-    found = False
-    en = bool(payload.get("enabled", True))
-    reason = (payload.get("reason") or "manual toggle").strip()
-    for j in jobs:
-        if str(j.get("id")) == job_id:
-            j["enabled"] = en
-            if not en:
-                j["disabled_reason"] = reason
-                j["disabled_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            found = True
-            break
-    if not found:
-        raise HTTPException(status_code=404, detail="job não encontrado")
-    p.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
-    return {"ok": True}
-
-# === Logs & Failed Signals =========================================
-LOG_DIR    = LOGS_DIR
-FAILED_DIR = _apps_root() / "outputs" / "live" / "signals" / "failed"
+def _tail_text(path: Path, n: int = 200) -> str:
+    try:
+        if not path.exists():
+            return f"[{path}] não encontrado."
+        txt = path.read_text(encoding="utf-8", errors="replace")
+        lines = txt.splitlines()
+        n = max(1, int(n))
+        return "\n".join(lines[-n:])
+    except Exception as e:
+        return f"Erro a ler {path}: {e}"
 
 @router.get("/logs/list")
 def logs_list():
+    base = _logs_dir()
+
     def item(p: Path):
         try:
             st = p.stat()
@@ -1025,12 +937,10 @@ def logs_list():
             return {"name": p.name, "path": str(p), "size": None, "mtime": None, "age_min": None}
 
     files: list[Path] = []
-    if LOG_DIR.exists():
-        # include main and rotated variants
+    if base.exists():
         for pat in ("*.log", "*.log.*", "*.txt"):
-            files.extend(LOG_DIR.glob(pat))
+            files.extend(base.glob(pat))
 
-    # sort newest first and de-dup by file name (keep first/newest)
     files.sort(key=lambda p: (p.name, p.stat().st_mtime if p.exists() else 0), reverse=True)
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
@@ -1040,41 +950,31 @@ def logs_list():
         seen.add(p.name)
         out.append(item(p))
 
-    return {"dir": str(LOG_DIR), "files": out}
+    return {"dir": str(base), "files": out}
 
 @router.get("/logs/get")
 def logs_get(name: str = "executor.log", n: int = 200):
-    p = _safe_join(LOG_DIR, name)
+    base = _logs_dir()
+    p = _safe_join(base, name)
     return PlainTextResponse(_tail_text(p, n))
 
-def _tail_text(path: Path, n: int = 200) -> str:
-    """
-    Simple tail for small/medium logs. Returns last N lines.
-    """
-    try:
-        if not path.exists():
-            return f"[{path}] não encontrado."
-        txt = path.read_text(encoding="utf-8", errors="replace")
-        lines = txt.splitlines()
-        n = max(1, int(n))
-        return "\n".join(lines[-n:])
-    except Exception as e:
-        return f"Erro a ler {path}: {e}"
+FAILED_DIR_NAME = "failed"
 
 @router.get("/failed/list")
 def failed_list(limit: int = 50):
+    failed_dir = _signals_dir() / FAILED_DIR_NAME
     items: list[dict[str, Any]] = []
-    if not FAILED_DIR.exists():
-        return {"dir": str(FAILED_DIR), "items": items}
+    if not failed_dir.exists():
+        return {"dir": str(failed_dir), "items": items}
 
-    cand = list(FAILED_DIR.glob("*.json.work"))
+    cand = list(failed_dir.glob("*.json.work"))
     cand.sort(key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True)
     for f in cand[: max(1, int(limit))]:
         try:
             st = f.stat()
         except Exception:
             continue
-        err = FAILED_DIR / (f.name + ".error.txt")
+        err = failed_dir / (f.name + ".error.txt")
         rec: dict[str, Any] = {
             "file": f.name,
             "mtime": st.st_mtime,
@@ -1091,11 +991,12 @@ def failed_list(limit: int = 50):
                 rec["error_preview"] = None
         items.append(rec)
 
-    return {"dir": str(FAILED_DIR), "items": items}
+    return {"dir": str(failed_dir), "items": items}
 
 @router.get("/failed/get")
 def failed_get(file: str):
-    p = _safe_join(FAILED_DIR, file)
+    failed_dir = _signals_dir() / FAILED_DIR_NAME
+    p = _safe_join(failed_dir, file)
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="ficheiro não encontrado")
     try:
@@ -1106,15 +1007,12 @@ def failed_get(file: str):
 
 @router.post("/failed/retry")
 def failed_retry(payload: Dict[str, Any]):
-    """
-    Reenvia um *.json.work de FAILED → signals/inbox como *.json (remove .work).
-    Move o erro associado (*.json.work.error.txt) para signals/archive/.
-    """
     name = str(payload.get("file") or "")
     if not name.endswith(".json.work"):
         raise HTTPException(status_code=400, detail="esperava *.json.work")
 
-    src = _safe_join(FAILED_DIR, name)
+    failed_dir = _signals_dir() / FAILED_DIR_NAME
+    src = _safe_join(failed_dir, name)
     if not src.exists():
         raise HTTPException(status_code=404, detail="work file não existe")
 
@@ -1129,7 +1027,7 @@ def failed_retry(payload: Dict[str, Any]):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"falha a mover para inbox: {e}")
 
-    err = _safe_join(FAILED_DIR, name + ".error.txt")
+    err = _safe_join(failed_dir, name + ".error.txt")
     if err.exists():
         arch = _signals_dir() / "archive"
         arch.mkdir(parents=True, exist_ok=True)
@@ -1139,24 +1037,3 @@ def failed_retry(payload: Dict[str, Any]):
             pass
 
     return {"ok": True, "moved_to": str(dst)}
-
-# --- NOVO: abrir o retrain.yaml diretamente (usado pelo botão "Ver Schedule")
-@router.get("/view_schedule")
-def view_schedule():
-    p = _schedule_file()
-    if not p.exists():
-        return PlainTextResponse("retrain.yaml não encontrado", status_code=404)
-    return PlainTextResponse(p.read_text(encoding="utf-8"))
-
-# --- NOVO: abrir um config YAML arbitrário (usado pelo link "Ver cfg" na tabela)
-@router.get("/view_config")
-def view_config(file: str):
-    base = _configs_dir()
-    p = _safe_join(base, file)
-    if not p.exists() or not p.is_file():
-        raise HTTPException(status_code=404, detail="config não encontrado")
-    try:
-        txt = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        txt = p.read_text(encoding="latin-1", errors="replace")
-    return PlainTextResponse(txt)

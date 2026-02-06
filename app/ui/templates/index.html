@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark light">
     <!-- CSS -->
-    <link rel="stylesheet" href="/static/css/app.css?v=20251203">
+    <link rel="stylesheet" href="/static/css/app.css?v=20251217">
   </head>
   <body>
     <header class="topbar">
@@ -43,16 +43,6 @@
             <span id="meta-emitter" class="meta"></span>
           </div>
           <div class="group">
-            <span class="name">Gov.</span>
-            <span id="light-governor" class="light off"></span>
-            <span id="meta-governor" class="meta"></span>
-          </div>
-          <div class="group">
-            <span class="name">Promo</span>
-            <span id="light-promoter" class="light off"></span>
-            <span id="meta-promoter" class="meta"></span>
-          </div>
-          <div class="group">
             <span class="name">Pos. Mgr</span>
             <span id="light-posmanager" class="light off"></span>
             <span id="meta-posmanager" class="meta"></span>
@@ -61,6 +51,9 @@
         <button id="themeToggle" class="btn-small" title="Alternar tema">☀️</button>
       </div>
     </header>
+
+    <!-- Badge da instância (preenchido via /ui/api/env pelo dashboard.js) -->
+    <div id="instanceBadgeHost" style="padding: 0 16px;"></div>
 
     <div id="globalStatus" class="status-banner off">
       ⚫ Sem ligação à API
@@ -107,18 +100,6 @@
             <div class="kvs" id="emitterCard"></div>
           </div>
 
-          <!-- Governor -->
-          <div class="card">
-            <div class="title">Governor</div>
-            <div class="kvs" id="governorCard"></div>
-          </div>
-
-          <!-- Promoter -->
-          <div class="card">
-            <div class="title">Promoter</div>
-            <div class="kvs" id="promoterCard"></div>
-          </div>
-
           <!-- Position Manager -->
           <div class="card">
             <div class="title">Position Manager</div>
@@ -137,8 +118,6 @@
                 <option value="retrain">retrain</option>
                 <option value="watcher">watcher</option>
                 <option value="emitter">emitter</option>
-                <option value="governor">governor</option>
-                <option value="promoter">promoter</option>
                 <option value="position_manager">position_manager</option>
                 <option value="all">all</option>
               </select>
@@ -162,7 +141,7 @@
           <pre id="scheduleYaml" class="pre" style="margin-top:8px; display:none"></pre>
         </div>
 
-        <!-- Portfolio em SECÇÃO própria (não dentro da grelha principal) -->
+        <!-- Portfolio -->
         <div class="card" style="margin-top:16px">
           <div class="title">Portfolio Top-K</div>
           <div id="portfolioBox">
@@ -189,8 +168,6 @@
               <option>retrain</option>
               <option>watcher</option>
               <option>emitter</option>
-              <option>governor</option>
-              <option>promoter</option>
               <option>position_manager</option>
             </select>
             <button onclick="opsRun('up')" class="btn-small">Up</button>
@@ -262,24 +239,6 @@
         </div>
 
         <div class="card">
-          <div class="title">Governor</div>
-          <button id="btn-governor-start">Start</button>
-          <button id="btn-governor-start-vis">Start (visível)</button>
-          <button id="btn-governor-stop">Stop</button>
-          <button id="btn-governor-restart">Restart</button>
-          <button id="btn-governor-restart-vis">Restart (visível)</button>
-        </div>
-
-        <div class="card">
-          <div class="title">Promoter</div>
-          <button id="btn-promoter-start">Start</button>
-          <button id="btn-promoter-start-vis">Start (visível)</button>
-          <button id="btn-promoter-stop">Stop</button>
-          <button id="btn-promoter-restart">Restart</button>
-          <button id="btn-promoter-restart-vis">Restart (visível)</button>
-        </div>
-
-        <div class="card">
           <div class="title">All</div>
           <button id="btn-all-start">ALL Start</button>
           <button id="btn-all-stop">ALL Stop</button>
@@ -295,16 +254,18 @@
 
     <!-- Config da API (ajusta a origin se for preciso) -->
     <script>
-      // Bridge FastAPI
-      window.API_ORIGIN = "http://127.0.0.1:5005";
+      // ✅ Multi-instância: usar mesma origem da UI
+      // A UI serve /ui/api/* (ou proxy), portanto NÃO hardcode de portas aqui.
+      window.API_ORIGIN = "";      // <- importante
       window.API_BASE   = "/ui/api";
     </script>
+
     <!-- JS comum (tabs + theme + api helper) -->
-    <script src="/static/js/common.js?v=20251203"></script>
+    <script src="/static/js/common.js?v=20251217"></script>
     <!-- Dashboard (health, strategies, portfolio, logs) -->
-    <script src="/static/js/dashboard.js?v=20251203"></script>
+    <script src="/static/js/dashboard.js?v=20251217"></script>
     <!-- Ops & Control -->
-    <script src="/static/js/ops.js?v=20251015"></script>
-    <script src="/static/js/control.js?v=20251015"></script>
+    <script src="/static/js/ops.js?v=20251217"></script>
+    <script src="/static/js/control.js?v=20251217"></script>
   </body>
 </html>

@@ -392,14 +392,12 @@ def deals_recent(days: int = Query(1, ge=0, le=30), _: None = Depends(require_ap
     svc = MT5Service()
 
     if _is_webrequest_mode(svc):
-        raise HTTPException(
-            status_code=501,
-            detail={
-                "error": "native_only_endpoint",
-                "endpoint": "/deals_recent",
-                "hint": "Em webrequest, só existe se o EA publicar history/deals (não implementado).",
-            },
-        )
+        # Serve from EA-pushed store (deals history is published by EA)
+        from app.services.mt5.state_store import STORE
+        st = STORE.snapshot()
+        deals = list(st.deals_history or [])
+        deals.sort(key=lambda x: (x.get("time_msc") or 0))
+        return {"ok": True, "mode": "webrequest", "count": len(deals), "data": deals}
 
     svc.ensure_up()
     return svc.deals_recent(days=days)
@@ -456,8 +454,17 @@ def quote(symbol: str = Query(...), _: None = Depends(require_api_key)):
 
     if _is_webrequest_mode(svc):
         st = STORE.snapshot()
-        sym = symbol.upper().strip()
-        q = (st.quotes or {}).get(sym)
+        # Preserve exact broker casing (e.g. "SpotCrude", "NatGas").
+        # Uppercasing breaks mixed-case symbols — use case-insensitive fallback instead.
+        sym = symbol.strip()
+        quotes = st.quotes or {}
+        q = quotes.get(sym)
+        if q is None:
+            sym_up = sym.upper()
+            for k, v in quotes.items():
+                if k.upper() == sym_up:
+                    q = v
+                    break
         if not q:
             return {"ok": False, "mode": "webrequest", "symbol": sym, "hint": "EA ainda não publicou quote", **_ea_meta()}
         return {"ok": True, "mode": "webrequest", **q, **_ea_meta()}
@@ -472,8 +479,16 @@ def symbol_info(symbol: str = Query(...), _: None = Depends(require_api_key)):
 
     if _is_webrequest_mode(svc):
         st = STORE.snapshot()
-        sym = symbol.upper().strip()
-        info = (st.symbol_info or {}).get(sym)
+        # Preserve exact broker casing — same reason as /quote above.
+        sym = symbol.strip()
+        sym_info = st.symbol_info or {}
+        info = sym_info.get(sym)
+        if info is None:
+            sym_up = sym.upper()
+            for k, v in sym_info.items():
+                if k.upper() == sym_up:
+                    info = v
+                    break
         if not info:
             return {"ok": False, "mode": "webrequest", "symbol": sym, "hint": "EA ainda não publicou symbol_info", **_ea_meta()}
         return {"ok": True, "mode": "webrequest", **info, **_ea_meta()}

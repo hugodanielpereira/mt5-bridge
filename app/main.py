@@ -341,7 +341,7 @@ def health(verbose: int = Query(0, ge=0, le=1)):
         return {"ok": False, "reason": f"diag_failed: {e}"}
 
     st = STORE.snapshot()
-    ttl = int(os.getenv("EA_TTL_MS", "5000"))
+    ttl = int(os.getenv("EA_TTL_MS", "15000"))
     now_ms = int(time.time() * 1000)
     age_ms = (now_ms - int(st.last_heartbeat_ms or 0)) if int(st.last_heartbeat_ms or 0) > 0 else None
 

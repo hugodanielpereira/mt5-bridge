@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from app.common.auth import require_api_key
 from app.services.mt5.state_store import STORE
@@ -75,6 +75,80 @@ def ea_symbol_info(payload: Dict[str, Any], _: None = Depends(require_api_key)):
         raise HTTPException(status_code=400, detail="missing symbol")
     STORE.set_symbol_info(symbol, payload)
     return {"ok": True}
+
+
+@router.post("/ea/quotes")
+def ea_quotes_batch(payload: Dict[str, Any], _: None = Depends(require_api_key)):
+    """Batch quote update: {"quotes":[{symbol, bid, ask, ...}, ...]}"""
+    quotes = payload.get("quotes")
+    if not isinstance(quotes, list):
+        raise HTTPException(status_code=400, detail="expected {'quotes':[...]}")
+    count = 0
+    for q in quotes:
+        if not isinstance(q, dict):
+            continue
+        sym = (q.get("symbol") or "").strip()
+        if not sym:
+            continue
+        STORE.set_quote(sym, q)
+        count += 1
+    return {"ok": True, "count": count}
+
+
+@router.post("/ea/symbol_info_batch")
+def ea_symbol_info_batch(payload: Dict[str, Any], _: None = Depends(require_api_key)):
+    """Batch symbol info: {"symbols":[{symbol, digits, ...}, ...]}"""
+    symbols = payload.get("symbols")
+    if not isinstance(symbols, list):
+        raise HTTPException(status_code=400, detail="expected {'symbols':[...]}")
+    count = 0
+    for s in symbols:
+        if not isinstance(s, dict):
+            continue
+        sym = (s.get("symbol") or "").strip()
+        if not sym:
+            continue
+        STORE.set_symbol_info(sym, s)
+        count += 1
+    return {"ok": True, "count": count}
+
+
+@router.post("/ea/ohlcv_batch")
+def ea_ohlcv_batch(payload: Dict[str, Any], _: None = Depends(require_api_key)):
+    """Batch OHLCV: {"batch":[{symbol, tf, rows:[...]}, ...]}"""
+    batch = payload.get("batch")
+    if not isinstance(batch, list):
+        raise HTTPException(status_code=400, detail="expected {'batch':[...]}")
+    count = 0
+    for item in batch:
+        if not isinstance(item, dict):
+            continue
+        sym = (item.get("symbol") or "").strip()
+        tf = (item.get("tf") or item.get("timeframe") or "").upper().strip()
+        rows = item.get("rows") or item.get("ohlcv") or item.get("bars")
+        if not sym or not tf or not isinstance(rows, list):
+            continue
+        STORE.set_ohlcv(sym, tf, rows)
+        count += 1
+    return {"ok": True, "count": count}
+
+
+@router.post("/ea/deals")
+def ea_deals(payload: Dict[str, Any], _: None = Depends(require_api_key)):
+    deals = payload.get("deals")
+    if not isinstance(deals, list):
+        raise HTTPException(status_code=400, detail="expected {'deals':[...]}")
+    STORE.set_deals_history(deals)
+    return {"ok": True, "count": len(deals)}
+
+
+@router.post("/ea/orders_history")
+def ea_orders_history(payload: Dict[str, Any], _: None = Depends(require_api_key)):
+    orders = payload.get("orders")
+    if not isinstance(orders, list):
+        raise HTTPException(status_code=400, detail="expected {'orders':[...]}")
+    STORE.set_orders_history(orders)
+    return {"ok": True, "count": len(orders)}
 
 
 @router.post("/ea/ohlcv")
@@ -189,3 +263,25 @@ def get_ea_command(
 @router.get("/ea/commands_health")
 def commands_health(_: None = Depends(require_api_key)):
     return COMMANDS.health()
+
+
+@router.get("/ea/ohlcv-inventory")
+def ea_ohlcv_inventory(_: None = Depends(require_api_key)):
+    """
+    List all OHLCV symbol:TF keys currently in the in-memory store, with bar counts.
+    Useful to confirm what the EA is actually pushing (e.g. if H1 is missing the EA
+    has not been configured to push that TF).
+    """
+    st = STORE.snapshot()
+    ohlcv = st.ohlcv or {}
+    by_symbol: Dict[str, Dict[str, int]] = {}
+    for key, rows in ohlcv.items():
+        parts = key.split(":", 1)
+        sym = parts[0] if len(parts) == 2 else key
+        tf  = parts[1] if len(parts) == 2 else "?"
+        by_symbol.setdefault(sym, {})[tf] = len(rows)
+    return {
+        "ok": True,
+        "total_keys": len(ohlcv),
+        "by_symbol": by_symbol,
+    }

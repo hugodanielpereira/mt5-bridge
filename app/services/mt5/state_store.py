@@ -37,6 +37,12 @@ class MT5WebState:
     # ---------------- ohlcv cache ----------------
     ohlcv: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)  # key=f"{symbol}:{tf}" -> rows
 
+    # ---------------- deal/order history (EA pushes periodically) ----
+    deals_history: List[Dict[str, Any]] = field(default_factory=list)
+    orders_history: List[Dict[str, Any]] = field(default_factory=list)
+    deals_history_ts: int = 0
+    orders_history_ts: int = 0
+
     # ---------------- command channel (Bridge -> EA) ----------------
     pending_commands: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -83,6 +89,10 @@ class MT5StateStore:
                 quotes={k: dict(v) for k, v in (st.quotes or {}).items()},
                 symbol_info={k: dict(v) for k, v in (st.symbol_info or {}).items()},
                 ohlcv={k: [dict(x) for x in v] for k, v in (st.ohlcv or {}).items()},
+                deals_history=[dict(x) for x in (st.deals_history or [])],
+                orders_history=[dict(x) for x in (st.orders_history or [])],
+                deals_history_ts=st.deals_history_ts,
+                orders_history_ts=st.orders_history_ts,
                 pending_commands=[dict(x) for x in (st.pending_commands or [])],
                 commands={k: dict(v) for k, v in (st.commands or {}).items()},
                 last_result_ms=st.last_result_ms,
@@ -207,6 +217,22 @@ class MT5StateStore:
                         setattr(self._st, attr, str(v).strip())
                         break
 
+            # Extract account data from heartbeat (EA sends balance/equity/etc.)
+            _acct_fields = ("balance", "equity", "margin", "free_margin", "profit", "currency", "leverage")
+            if any(meta.get(f) is not None for f in _acct_fields):
+                acct: Dict[str, Any] = dict(self._st.account or {})
+                for f in _acct_fields:
+                    v = meta.get(f)
+                    if v is not None:
+                        acct[f] = v
+                # also include login/server for completeness
+                if self._st.account_login:
+                    acct["login"] = self._st.account_login
+                if self._st.server:
+                    acct["server"] = self._st.server
+                acct["ts_ms"] = parsed_ms
+                self._st.account = acct
+
     def set_account(self, account: Dict[str, Any]) -> None:
         with self._lock:
             self._st.last_heartbeat_ms = _now_ms()
@@ -238,6 +264,16 @@ class MT5StateStore:
             it.setdefault("symbol", sym)
             it.setdefault("ts_ms", _now_ms())
             self._st.symbol_info[sym] = it
+
+    def set_deals_history(self, deals: List[Dict[str, Any]]) -> None:
+        with self._lock:
+            self._st.deals_history = [x for x in (deals or []) if isinstance(x, dict)]
+            self._st.deals_history_ts = _now_ms()
+
+    def set_orders_history(self, orders: List[Dict[str, Any]]) -> None:
+        with self._lock:
+            self._st.orders_history = [x for x in (orders or []) if isinstance(x, dict)]
+            self._st.orders_history_ts = _now_ms()
 
     def set_ohlcv(self, symbol: str, tf: str, rows: List[Dict[str, Any]]) -> None:
         sym = (symbol or "").strip()

@@ -92,6 +92,29 @@ def symbol_info(symbol: str = Query(..., min_length=1)):
 
 @router.get("/quote")
 def quote(symbol: str = Query(..., min_length=1)):
+    # Webrequest mode: read from state store (EA pushes quotes via POST /ea/quote).
+    # Do NOT uppercase — the EA stores keys with exact broker casing (e.g. "SpotCrude").
+    if not _is_native_mode():
+        from app.services.mt5.state_store import STORE as _STORE
+        sym = symbol.strip()
+        st = _STORE.snapshot()
+        quotes = st.quotes or {}
+        q = quotes.get(sym)
+        if q is None:
+            # Case-insensitive fallback scan (handles casing mismatches between
+            # Postgres symbol names and EA-pushed keys, e.g. SPOTCRUDE vs SpotCrude)
+            sym_up = sym.upper()
+            for k, v in quotes.items():
+                if k.upper() == sym_up:
+                    q = v
+                    break
+        if q is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "symbol not in quote cache", "symbol": sym, "mt5_mode": _mt5_mode()},
+            )
+        return q
+    # Native mode
     try:
         svc = get_service()
         svc.ensure_up()

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.common.auth import require_api_key
 from app.common.service_registry import get_service
 from app.common.meta import bridge_instance_id
+from app.services.mt5.state_store import STORE
 
 router = APIRouter(tags=["history"])
 
@@ -199,6 +200,26 @@ def _order_row(o: Any) -> Dict[str, Any]:
 # -----------------------------------------------------------------------------
 # Deals / Orders (histórico)
 # -----------------------------------------------------------------------------
+def _deals_from_store(symbol: Optional[str], magic: Optional[int]) -> List[Dict[str, Any]]:
+    """Read deals history from in-memory store (pushed by EA in webrequest mode)."""
+    st = STORE.snapshot()
+    out = list(st.deals_history or [])
+    out = _filter_symbol(out, symbol)
+    out = _filter_magic(out, magic)
+    out.sort(key=lambda x: (x.get("time_msc") or 0, x.get("time") or ""))
+    return out
+
+
+def _orders_from_store(symbol: Optional[str], magic: Optional[int]) -> List[Dict[str, Any]]:
+    """Read orders history from in-memory store (pushed by EA in webrequest mode)."""
+    st = STORE.snapshot()
+    out = list(st.orders_history or [])
+    out = _filter_symbol(out, symbol)
+    out = _filter_magic(out, magic)
+    out.sort(key=lambda x: (x.get("time_done_msc") or 0, x.get("time_done") or x.get("time_setup") or ""))
+    return out
+
+
 @router.get("/deals_history")
 def deals_history(
     days: int = Query(7, ge=1, le=365),
@@ -206,7 +227,11 @@ def deals_history(
     magic: Optional[int] = Query(default=None),
     _: None = Depends(require_api_key),
 ):
-    _require_native_or_501("/deals_history")
+    # Webrequest mode: serve from EA-pushed store
+    if _is_webrequest_mode():
+        out = _deals_from_store(symbol, magic)
+        return {"ok": True, "bridge_instance_id": bridge_instance_id(),
+                "mode": "webrequest", "count": len(out), "data": out}
 
     svc = get_service()
     svc.ensure_up()
@@ -236,7 +261,11 @@ def orders_history(
     magic: Optional[int] = Query(default=None),
     _: None = Depends(require_api_key),
 ):
-    _require_native_or_501("/orders_history")
+    # Webrequest mode: serve from EA-pushed store
+    if _is_webrequest_mode():
+        out = _orders_from_store(symbol, magic)
+        return {"ok": True, "bridge_instance_id": bridge_instance_id(),
+                "mode": "webrequest", "count": len(out), "data": out}
 
     svc = get_service()
     svc.ensure_up()
@@ -272,7 +301,6 @@ def history(
     magic: Optional[int] = Query(default=None),
     _: None = Depends(require_api_key),
 ):
-    _require_native_or_501("/history")
     deals = deals_history(days=days, symbol=symbol, magic=magic, _=None)
     orders = orders_history(days=days, symbol=symbol, magic=magic, _=None)
     return {
@@ -295,13 +323,24 @@ def deals_since(
     limit: int = Query(2000, ge=1, le=5000),
     _: None = Depends(require_api_key),
 ):
-    _require_native_or_501("/deals_since")
+    if since_msc is not None and since_msc < 0:
+        raise HTTPException(status_code=400, detail="'since_msc' must be >= 0")
+
+    # Webrequest mode: filter from EA-pushed store
+    if _is_webrequest_mode():
+        out = _deals_from_store(symbol, magic)
+        if since_msc is not None:
+            out = [x for x in out if (x.get("time_msc") or 0) > int(since_msc)]
+        out.sort(key=lambda x: (x.get("time_msc") or 0, x.get("time") or ""))
+        if len(out) > limit:
+            out = out[:limit]
+        next_cursor = max((x.get("time_msc") or 0) for x in out) if out else None
+        return {"ok": True, "bridge_instance_id": bridge_instance_id(),
+                "mode": "webrequest", "count": len(out),
+                "next_since_msc": next_cursor, "data": out}
 
     svc = get_service()
     svc.ensure_up()
-
-    if since_msc is not None and since_msc < 0:
-        raise HTTPException(status_code=400, detail="'since_msc' must be >= 0")
 
     if since_msc is not None:
         since_dt = datetime.fromtimestamp(int(since_msc) / 1000.0, tz=timezone.utc)

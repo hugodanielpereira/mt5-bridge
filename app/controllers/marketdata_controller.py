@@ -42,10 +42,18 @@ def _ea_meta() -> Dict[str, Any]:
 
 def _get_rows_webrequest(symbol: str, tf: str, limit: int) -> List[Dict[str, Any]]:
     st = STORE.snapshot()
-    sym = symbol.upper().strip()
+    # Symbol: do NOT uppercase — the EA stores keys with the exact broker casing
+    # (e.g. "SpotCrude", "NatGas").  state_store.set_ohlcv() preserves case on
+    # the write side, so we must match exactly here.  Uppercasing breaks any broker
+    # symbol that uses mixed case.
+    sym = symbol.strip()
     t = tf.upper().strip()
     key = f"{sym}:{t}"
     rows = (st.ohlcv or {}).get(key) or []
+    if not rows:
+        # Fallback: try uppercase in case the EA stored with a different convention
+        key_upper = f"{sym.upper()}:{t}"
+        rows = (st.ohlcv or {}).get(key_upper) or []
     if limit:
         rows = rows[-int(limit):]
     return rows
@@ -61,7 +69,7 @@ def _resp_ok(symbol: str, tf: str, rows: List[Dict[str, Any]], *, mode: str) -> 
     return {
         "ok": True,
         "mode": mode,
-        "symbol": symbol.upper().strip(),
+        "symbol": symbol.strip(),        # preserve broker casing (e.g. SpotCrude)
         "tf": tf.upper().strip(),
         "count": len(rows),
         "rows": rows,
@@ -230,3 +238,141 @@ def mt5_ohlcv(
 
     out = _get_rows_native(symbol, tf, limit, None, None)
     return out
+
+
+# ----------------------------
+# Symbol info endpoint (webrequest-mode safe)
+# ----------------------------
+
+# Static tick specs for common symbols — used as fallback when EA hasn't pushed symbol_info.
+# tick_value is approximate (EUR account, ~2026 mid-rates).  Accurate to ±10% as rates drift,
+# which is far better than the 100-200× overstatement from the default 0.00001/1.0 fallback.
+_STATIC_SYMBOL_SPECS: Dict[str, Dict[str, Any]] = {
+    # Standard 5-decimal forex (account EUR ~1.08 USD)
+    "EURUSD":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 0.93, "volume_min": 0.01, "volume_step": 0.01},
+    "GBPUSD":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 0.93, "volume_min": 0.01, "volume_step": 0.01},
+    "AUDUSD":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 0.93, "volume_min": 0.01, "volume_step": 0.01},
+    "NZDUSD":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 0.93, "volume_min": 0.01, "volume_step": 0.01},
+    "USDCAD":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 0.68, "volume_min": 0.01, "volume_step": 0.01},
+    "USDCHF":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 1.04, "volume_min": 0.01, "volume_step": 0.01},
+    "EURCAD":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 0.68, "volume_min": 0.01, "volume_step": 0.01},
+    "EURGBP":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 1.17, "volume_min": 0.01, "volume_step": 0.01},
+    "EURAUD":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 0.60, "volume_min": 0.01, "volume_step": 0.01},
+    "GBPCHF":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 1.04, "volume_min": 0.01, "volume_step": 0.01},
+    "AUDCAD":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 0.68, "volume_min": 0.01, "volume_step": 0.01},
+    "EURNZD":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 0.56, "volume_min": 0.01, "volume_step": 0.01},
+    "GBPAUD":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 0.60, "volume_min": 0.01, "volume_step": 0.01},
+    "AUDNZD":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 0.56, "volume_min": 0.01, "volume_step": 0.01},
+    "GBPNZD":   {"tick_size": 0.00001, "point": 0.00001, "digits": 5, "tick_value": 0.56, "volume_min": 0.01, "volume_step": 0.01},
+    # JPY pairs (3-decimal — tick_size=0.001; tick_value per lot ≈ 100k/EURJPY)
+    "USDJPY":   {"tick_size": 0.001, "point": 0.001, "digits": 3, "tick_value": 0.62, "volume_min": 0.01, "volume_step": 0.01},
+    "EURJPY":   {"tick_size": 0.001, "point": 0.001, "digits": 3, "tick_value": 0.62, "volume_min": 0.01, "volume_step": 0.01},
+    "GBPJPY":   {"tick_size": 0.001, "point": 0.001, "digits": 3, "tick_value": 0.62, "volume_min": 0.01, "volume_step": 0.01},
+    "AUDJPY":   {"tick_size": 0.001, "point": 0.001, "digits": 3, "tick_value": 0.62, "volume_min": 0.01, "volume_step": 0.01},
+    "NZDJPY":   {"tick_size": 0.001, "point": 0.001, "digits": 3, "tick_value": 0.62, "volume_min": 0.01, "volume_step": 0.01},
+    "CADJPY":   {"tick_size": 0.001, "point": 0.001, "digits": 3, "tick_value": 0.62, "volume_min": 0.01, "volume_step": 0.01},
+    "CHFJPY":   {"tick_size": 0.001, "point": 0.001, "digits": 3, "tick_value": 0.62, "volume_min": 0.01, "volume_step": 0.01},
+    # Metals
+    "XAUUSD":   {"tick_size": 0.01, "point": 0.01, "digits": 2, "tick_value": 0.93, "volume_min": 0.01, "volume_step": 0.01},
+    "GOLD":     {"tick_size": 0.01, "point": 0.01, "digits": 2, "tick_value": 0.93, "volume_min": 0.01, "volume_step": 0.01},
+    "XAGUSD":   {"tick_size": 0.001, "point": 0.001, "digits": 3, "tick_value": 0.93, "volume_min": 0.01, "volume_step": 0.01},
+    # Energy
+    "USOIL":    {"tick_size": 0.001, "point": 0.001, "digits": 3, "tick_value": 0.93, "volume_min": 0.01, "volume_step": 0.01},
+    "XTIUSD":   {"tick_size": 0.001, "point": 0.001, "digits": 3, "tick_value": 0.93, "volume_min": 0.01, "volume_step": 0.01},
+    "XBRUSD":   {"tick_size": 0.001, "point": 0.001, "digits": 3, "tick_value": 0.93, "volume_min": 0.01, "volume_step": 0.01},
+    "SpotCrude":{"tick_size": 0.001, "point": 0.001, "digits": 3, "tick_value": 0.93, "volume_min": 0.01, "volume_step": 0.01},
+    "NatGas":   {"tick_size": 0.001, "point": 0.001, "digits": 3, "tick_value": 0.93, "volume_min": 0.01, "volume_step": 0.01},
+}
+
+
+@router.get("/symbol_info")
+def get_symbol_info(
+    symbol: str = Query(..., min_length=1),
+    _: None = Depends(require_api_key),
+):
+    """Return symbol specs (tick_size, tick_value, digits, volume_min, volume_step).
+
+    webrequest mode: reads EA-pushed STORE.symbol_info; falls back to _STATIC_SYMBOL_SPECS.
+    native mode: calls MT5Service.symbol_info().
+    """
+    svc = None
+    try:
+        svc = get_service()
+    except Exception:
+        svc = None
+
+    if _is_webrequest_mode(svc):
+        st = STORE.snapshot()
+        sym = symbol.strip()
+
+        # 1. EA-pushed symbol info (most accurate — reflects broker's actual values)
+        stored = (st.symbol_info or {}).get(sym) or (st.symbol_info or {}).get(sym.upper())
+        if stored:
+            return {"ok": True, "symbol": sym, "source": "ea_push", "info": stored, **_ea_meta()}
+
+        # 2. Static fallback (covers common symbols — accurate tick_size, approximate tick_value)
+        static = _STATIC_SYMBOL_SPECS.get(sym) or _STATIC_SYMBOL_SPECS.get(sym.upper())
+        if static:
+            return {"ok": True, "symbol": sym, "source": "static", "info": dict(static), **_ea_meta()}
+
+        raise HTTPException(status_code=404, detail=f"No symbol info for {sym!r} (EA not connected?)")
+
+    # native mode
+    try:
+        info = svc.symbol_info(symbol)
+        return {"ok": True, "symbol": symbol, "source": "native", "info": info}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+# ----------------------------
+# Live price endpoint
+# ----------------------------
+@router.get("/price/{symbol}")
+def get_price(
+    symbol: str,
+    _: None = Depends(require_api_key),
+):
+    """Return live bid/ask/mid for a symbol.
+
+    webrequest mode: reads EA-pushed quotes from STORE; falls back to last M1 bar close.
+    native mode: calls symbol_info_tick via MT5Service.
+    """
+    svc = None
+    try:
+        svc = get_service()
+    except Exception:
+        svc = None
+
+    if _is_webrequest_mode(svc):
+        st = STORE.snapshot()
+        sym = symbol.strip()
+
+        # 1. Try EA-pushed quote (has live bid/ask)
+        quote = (st.quotes or {}).get(sym) or (st.quotes or {}).get(sym.upper())
+        if quote:
+            bid = float(quote.get("bid") or 0)
+            ask = float(quote.get("ask") or 0)
+            mid = round((bid + ask) / 2, 8) if bid and ask else (bid or ask)
+            return {"ok": True, "symbol": sym, "bid": bid, "ask": ask, "mid": mid, "source": "quote", **_ea_meta()}
+
+        # 2. Fall back to last M1 bar close
+        rows = _get_rows_webrequest(sym, "M1", 1)
+        if not rows:
+            # Try H1 as last resort
+            rows = _get_rows_webrequest(sym, "H1", 1)
+        if rows:
+            close = float(rows[-1].get("close") or 0)
+            return {"ok": True, "symbol": sym, "bid": close, "ask": close, "mid": close, "source": "bar", **_ea_meta()}
+
+        raise HTTPException(status_code=503, detail=f"No price available for {sym}")
+
+    # native mode
+    try:
+        q = svc.quote(symbol)
+        bid = float(q.get("bid") or 0)
+        ask = float(q.get("ask") or 0)
+        mid = round((bid + ask) / 2, 8) if bid and ask else (bid or ask)
+        return {"ok": True, "symbol": symbol, "bid": bid, "ask": ask, "mid": mid, "source": "tick"}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))

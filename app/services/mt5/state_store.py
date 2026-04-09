@@ -1,11 +1,16 @@
 # app/services/mt5/state_store.py
 from __future__ import annotations
 
+import json
+import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any, Dict, List, Optional, Tuple
+
+log = logging.getLogger(__name__)
 
 
 def _now_ms() -> int:
@@ -63,13 +68,97 @@ class MT5StateStore:
     """
     Store em memória (thread-safe) para modo webrequest.
 
-    - single-process (uvicorn 1 worker) ok.
-    - se fores multi-worker/HA -> Redis (mesma API).
+    OHLCV bars are persisted to Redis (if REDIS_URL is set) so they survive
+    bridge process restarts.  Redis data volume has AOF + RDB persistence,
+    so bars survive Docker restarts too (only lost with ``down -v``).
     """
+
+    # Redis key prefix for OHLCV bars: mt5:{scope}:ohlcv:{symbol}:{tf}
+    _OHLCV_TTL_SEC = 7 * 24 * 3600  # 7 days
 
     def __init__(self) -> None:
         self._lock = RLock()
         self._st = MT5WebState()
+        self._redis = None          # lazy init
+        self._redis_ok = None       # None=not tried, True/False
+        self._redis_scope = (
+            (os.getenv("IID") or "").strip()
+            or (os.getenv("INSTANCE_ID") or "").strip()
+            or "default"
+        )
+
+    # ------------------------------------------------------------------
+    # Redis helpers for OHLCV persistence
+    # ------------------------------------------------------------------
+    def _get_redis(self):
+        """Lazy-init Redis connection.  Returns client or None."""
+        if self._redis_ok is False:
+            return None
+        if self._redis is not None:
+            return self._redis
+        redis_url = (os.getenv("REDIS_URL") or "").strip()
+        if not redis_url:
+            self._redis_ok = False
+            return None
+        try:
+            import redis as _redis_mod
+            self._redis = _redis_mod.Redis.from_url(redis_url, decode_responses=True)
+            self._redis.ping()
+            self._redis_ok = True
+            log.info("OHLCV Redis persistence enabled (scope=%s)", self._redis_scope)
+            return self._redis
+        except Exception as e:
+            log.warning("OHLCV Redis persistence unavailable: %s", e)
+            self._redis_ok = False
+            return None
+
+    def _ohlcv_redis_key(self, sym_tf_key: str) -> str:
+        return f"mt5:{self._redis_scope}:ohlcv:{sym_tf_key}"
+
+    def _persist_ohlcv_to_redis(self, key: str, rows: List[Dict[str, Any]]) -> None:
+        """Write OHLCV rows to Redis (best-effort, non-blocking)."""
+        r = self._get_redis()
+        if r is None:
+            return
+        try:
+            r.set(self._ohlcv_redis_key(key), json.dumps(rows, separators=(",", ":")),
+                   ex=self._OHLCV_TTL_SEC)
+        except Exception as e:
+            log.debug("Redis OHLCV write failed for %s: %s", key, e)
+
+    def load_ohlcv_from_redis(self) -> int:
+        """Restore all OHLCV bars from Redis into memory.  Call at startup.
+
+        Returns the number of symbol:tf pairs restored.
+        """
+        r = self._get_redis()
+        if r is None:
+            return 0
+        prefix = f"mt5:{self._redis_scope}:ohlcv:"
+        count = 0
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = r.scan(cursor, match=f"{prefix}*", count=200)
+                for rkey in keys:
+                    sym_tf = rkey[len(prefix):]
+                    try:
+                        raw = r.get(rkey)
+                        if raw:
+                            rows = json.loads(raw)
+                            if isinstance(rows, list) and rows:
+                                with self._lock:
+                                    self._st.ohlcv[sym_tf] = rows
+                                count += 1
+                    except Exception as e:
+                        log.debug("Redis OHLCV load failed for %s: %s", rkey, e)
+                if cursor == 0:
+                    break
+        except Exception as e:
+            log.warning("Redis OHLCV scan failed: %s", e)
+        if count > 0:
+            log.info("Restored %d OHLCV series from Redis", count)
+        return count
 
     # ------------------------------------------------------------------
     # Snapshot (safe copy)
@@ -275,15 +364,32 @@ class MT5StateStore:
             self._st.orders_history = [x for x in (orders or []) if isinstance(x, dict)]
             self._st.orders_history_ts = _now_ms()
 
-    def set_ohlcv(self, symbol: str, tf: str, rows: List[Dict[str, Any]]) -> None:
+    def set_ohlcv(self, symbol: str, tf: str, rows: List[Dict[str, Any]], merge: bool = False) -> None:
         sym = (symbol or "").strip()
         t = (tf or "").upper().strip()
         if not sym or not t:
             return
         key = f"{sym}:{t}"
+        clean_rows = [x for x in (rows or []) if isinstance(x, dict)]
+
+        if merge and clean_rows:
+            # Merge with existing data: combine, deduplicate by ts_ms, sort
+            with self._lock:
+                existing = list(self._st.ohlcv.get(key, []))
+            combined = existing + clean_rows
+            # Deduplicate by ts_ms (keep latest version)
+            seen: dict = {}
+            for row in combined:
+                ts = row.get("ts_ms", 0)
+                if ts:
+                    seen[ts] = row
+            clean_rows = sorted(seen.values(), key=lambda r: r.get("ts_ms", 0))
+
         with self._lock:
             self._st.last_heartbeat_ms = _now_ms()
-            self._st.ohlcv[key] = [x for x in (rows or []) if isinstance(x, dict)]
+            self._st.ohlcv[key] = clean_rows
+        # Persist to Redis outside the lock (best-effort)
+        self._persist_ohlcv_to_redis(key, clean_rows)
 
     # ------------------------------------------------------------------
     # Command Queue: Bridge -> EA
@@ -422,3 +528,5 @@ class MT5StateStore:
 
 # singleton simples
 STORE = MT5StateStore()
+# Restore OHLCV bars from Redis on module load (bridge startup)
+STORE.load_ohlcv_from_redis()

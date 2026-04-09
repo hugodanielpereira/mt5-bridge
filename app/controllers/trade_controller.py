@@ -94,7 +94,7 @@ def _norm_side(v: Any) -> str:
 
 
 def _norm_symbol(v: Any) -> str:
-    s = str(v or "").strip().upper()
+    s = str(v or "").strip()
     if not s:
         raise _badreq("field 'symbol' is required")
     return s
@@ -263,6 +263,75 @@ def order_market(payload: dict, _: None = Depends(require_api_key)):
                 "trace": traceback.format_exc().splitlines()[-12:],
             },
         )
+
+
+@router.post("/order_limit")
+def order_limit(payload: dict, _: None = Depends(require_api_key)):
+    """Place a limit/stop order (pending order).
+
+    Required: symbol, side, volume, price
+    Optional: sl, tp, magic, comment, scope
+    """
+    svc = MT5Service()
+
+    if _is_webrequest_mode(svc):
+        _require_fields(payload, ["symbol", "side", "volume", "price"])
+
+        sym = _norm_symbol(payload.get("symbol"))
+        side = _norm_side(payload.get("side"))
+        vol = _norm_float(payload.get("volume"), "volume")
+        price = _norm_float(payload.get("price"), "price")
+        if vol <= 0:
+            raise _badreq("field 'volume' must be > 0")
+        if price <= 0:
+            raise _badreq("field 'price' must be > 0")
+
+        sl = payload.get("sl", None)
+        tp = payload.get("tp", None)
+        sl_f = None if sl is None else _norm_float(sl, "sl")
+        tp_f = None if tp is None else _norm_float(tp, "tp")
+
+        cmd: Dict[str, Any] = {
+            "type": "order_limit",
+            "symbol": sym,
+            "side": side,
+            "volume": vol,
+            "price": price,
+        }
+        if sl_f is not None:
+            cmd["sl"] = sl_f
+        if tp_f is not None:
+            cmd["tp"] = tp_f
+
+        for k in ("magic", "comment", "scope"):
+            if payload.get(k) is not None:
+                cmd[k] = payload.get(k)
+
+        return _enqueue_cmd(cmd, scope=str(cmd.get("scope") or _default_scope()))
+
+    raise HTTPException(status_code=501, detail="order_limit not supported in native mode (use webrequest)")
+
+
+@router.post("/order_cancel")
+def order_cancel(payload: dict, _: None = Depends(require_api_key)):
+    """Cancel a pending order by ticket."""
+    svc = MT5Service()
+
+    ticket = payload.get("ticket", None)
+    if ticket is None:
+        raise _badreq("field 'ticket' required")
+
+    if _is_webrequest_mode(svc):
+        cmd: Dict[str, Any] = {
+            "type": "order_cancel",
+            "ticket": int(ticket),
+        }
+        for k in ("scope",):
+            if payload.get(k) is not None:
+                cmd[k] = payload.get(k)
+        return _enqueue_cmd(cmd, scope=str(cmd.get("scope") or _default_scope()))
+
+    raise HTTPException(status_code=501, detail="order_cancel not supported in native mode")
 
 
 @router.post("/order_modify")
@@ -541,4 +610,37 @@ def command_result(
         return {"ok": False, "cmd_id": cmd_id, "scope": sc, "found": False, **meta}
 
     return {"ok": True, "cmd_id": cmd_id, "scope": sc, "found": True, "result": r, **meta}
+
+
+@router.post("/fetch_history")
+def fetch_history(
+    payload: dict,
+    scope: str = Query("", description="scope override"),
+    _: None = Depends(require_api_key),
+):
+    """Request on-demand historical bar data from EA.
+
+    Payload: {symbol, tf, from_ts, to_ts}
+      - symbol: e.g. "EURUSD"
+      - tf: timeframe e.g. "M1", "H1" (default: "M1")
+      - from_ts: unix timestamp (seconds) for start
+      - to_ts: unix timestamp (seconds) for end (default: now)
+    """
+    sym = (payload.get("symbol") or "").strip()
+    tf = (payload.get("tf") or "M1").strip()
+    from_ts = payload.get("from_ts", 0)
+    to_ts = payload.get("to_ts", 0)
+
+    if not sym:
+        return {"ok": False, "error": "missing symbol"}
+
+    cmd = {
+        "type": "fetch_history",
+        "symbol": sym,
+        "comment": tf,
+        "price": float(from_ts),
+        "volume": float(to_ts),
+    }
+    meta = _enqueue_cmd(cmd, scope=scope)
+    return {"ok": True, "cmd_id": meta.get("id", ""), **meta}
 

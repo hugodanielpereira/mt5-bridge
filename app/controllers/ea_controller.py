@@ -133,6 +133,44 @@ def ea_ohlcv_batch(payload: Dict[str, Any], _: None = Depends(require_api_key)):
     return {"ok": True, "count": count}
 
 
+# ── History fetch (on-demand, chunked) ────────────────────────────────────
+# The EA sends historical bars in chunks via fetch_history command.
+# Each chunk is merged into the OHLCV store for the symbol/TF.
+_history_buffers: Dict[str, list] = {}  # cmd_id → accumulated rows
+
+@router.post("/ea/history_chunk")
+def ea_history_chunk(payload: Dict[str, Any], _: None = Depends(require_api_key)):
+    """Receive a chunk of historical bars from EA's CopyRates.
+
+    Payload: {symbol, tf, cmd_id, chunk, total, rows: [{ts_ms, open, high, low, close, volume}]}
+    """
+    sym = (payload.get("symbol") or "").strip()
+    tf = (payload.get("tf") or "").upper().strip()
+    cmd_id = payload.get("cmd_id", "")
+    chunk_idx = payload.get("chunk", 0)
+    total_chunks = payload.get("total", 1)
+    rows = payload.get("rows", [])
+
+    if not sym or not tf or not isinstance(rows, list):
+        raise HTTPException(status_code=400, detail="bad payload")
+
+    # Accumulate chunks
+    buf_key = f"{cmd_id}_{sym}_{tf}"
+    if buf_key not in _history_buffers:
+        _history_buffers[buf_key] = []
+    _history_buffers[buf_key].extend(rows)
+
+    # If this is the last chunk, merge into OHLCV store
+    if chunk_idx >= total_chunks - 1:
+        all_rows = _history_buffers.pop(buf_key, [])
+        if all_rows:
+            # Merge with existing OHLCV data (keep both, deduplicate by ts_ms)
+            STORE.set_ohlcv(sym, tf, all_rows, merge=True)
+        return {"ok": True, "symbol": sym, "tf": tf, "bars_received": len(all_rows), "complete": True}
+
+    return {"ok": True, "symbol": sym, "tf": tf, "chunk": chunk_idx, "bars_in_chunk": len(rows), "complete": False}
+
+
 @router.post("/ea/deals")
 def ea_deals(payload: Dict[str, Any], _: None = Depends(require_api_key)):
     deals = payload.get("deals")
